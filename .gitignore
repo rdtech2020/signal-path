@@ -1,0 +1,24 @@
+# Local secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+
+# Raw and generated data
+data/b2_download_file_by_id
+data/readable/*
+!data/readable/shodan_100.jsonl
+data/readable/shodan_sample_pretty.json
+
+# Runtime output
+logs/*.jsonl
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

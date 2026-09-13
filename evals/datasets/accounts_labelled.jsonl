@@ -1,0 +1,25 @@
+{"account_id":"domain:sakura.ne.jp","should_contact":true,"expected_signals":["exposed_winrm","origin_no_waf","windows_auth_leak"],"label_rationale":"Direct public administration and authentication exposure."}
+{"account_id":"domain:servercontrol.com.au","should_contact":true,"expected_signals":["exposed_winrm","origin_no_waf","windows_auth_leak"],"label_rationale":"Direct public administration and authentication exposure."}
+{"account_id":"domain:eveocloud.net","should_contact":true,"expected_signals":["exposed_winrm","http_server_error","origin_no_waf"],"label_rationale":"Public administration surface plus a server error."}
+{"account_id":"domain:maurexco.com","should_contact":true,"expected_signals":["eol_software","identified_cpe","origin_no_waf"],"label_rationale":"Explicit EOL tag and identifiable software."}
+{"account_id":"domain:estpak.ee","should_contact":true,"expected_signals":["legacy_vpn"],"label_rationale":"PPTP or equivalent legacy VPN is a strong replacement signal even below the current gate."}
+{"account_id":"domain:linodeusercontent.com","should_contact":false,"expected_signals":["eol_software","hosted_platform_domain","identified_cpe","origin_no_waf"],"label_rationale":"Provider-owned tenant hostname does not identify the buyer."}
+{"account_id":"domain:vultrusercontent.com","should_contact":false,"expected_signals":["hosted_platform_domain","identified_cpe","origin_no_waf","weak_tls"],"label_rationale":"Provider-owned tenant hostname does not identify the buyer."}
+{"account_id":"domain:cprapid.com","should_contact":false,"expected_signals":["identified_cpe","origin_no_waf"],"label_rationale":"CPE and WAF absence alone are insufficient outreach evidence."}
+{"account_id":"domain:ctcdn.cn","should_contact":false,"expected_signals":["identified_cpe","origin_no_waf"],"label_rationale":"CPE and WAF absence alone are insufficient outreach evidence."}
+{"account_id":"domain:kiddroof.com","should_contact":false,"expected_signals":["identified_cpe","origin_no_waf"],"label_rationale":"CPE and WAF absence alone are insufficient outreach evidence."}
+{"account_id":"domain:simplenet.com","should_contact":false,"expected_signals":["identified_cpe","origin_no_waf"],"label_rationale":"CPE and WAF absence alone are insufficient outreach evidence."}
+{"account_id":"domain:accu-turn.net","should_contact":false,"expected_signals":["cdn_edge","identified_cpe","weak_tls"],"label_rationale":"The observed surface is a CDN edge and attribution is weak."}
+{"account_id":"domain:telenet.be","should_contact":false,"expected_signals":["origin_no_waf"],"label_rationale":"WAF absence alone is not enough to contact an account."}
+{"account_id":"domain:server.plus","should_contact":false,"expected_signals":["identified_cpe"],"label_rationale":"A product identifier alone is not a buying signal."}
+{"account_id":"domain:amazonaws.com","should_contact":false,"expected_signals":["hosted_platform_domain"],"label_rationale":"Provider-owned hostname."}
+{"account_id":"domain:cloudflare.net","should_contact":false,"expected_signals":["cdn_edge","hosted_platform_domain","identified_cpe"],"label_rationale":"Provider edge, not an attributable buyer."}
+{"account_id":"domain:cloudfront.net","should_contact":false,"expected_signals":["cdn_edge","hosted_platform_domain"],"label_rationale":"Provider edge, not an attributable buyer."}
+{"account_id":"domain:contaboserver.net","should_contact":false,"expected_signals":["hosted_platform_domain"],"label_rationale":"Provider-owned hostname."}
+{"account_id":"domain:googleusercontent.com","should_contact":false,"expected_signals":["hosted_platform_domain"],"label_rationale":"Provider-owned hostname."}
+{"account_id":"domain:hinet.net","should_contact":false,"expected_signals":[],"label_rationale":"No actionable security evidence."}
+{"account_id":"domain:localhost","should_contact":false,"expected_signals":[],"label_rationale":"Invalid external sales account identity."}
+{"account_id":"domain:megared.net.mx","should_contact":false,"expected_signals":[],"label_rationale":"No actionable security evidence."}
+{"account_id":"domain:ovh.net","should_contact":false,"expected_signals":[],"label_rationale":"No actionable security evidence in this observation."}
+{"account_id":"domain:vodafone.hu","should_contact":false,"expected_signals":[],"label_rationale":"No actionable security evidence."}
+{"account_id":"domain:waldenu.edu","should_contact":false,"expected_signals":["cdn_edge","http_server_error","identified_cpe"],"label_rationale":"Error is observed at a CDN edge, so attribution is insufficient."}

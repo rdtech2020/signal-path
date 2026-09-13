@@ -1,0 +1,43 @@
+id: cybersecurity
+label: Cybersecurity
+record_kind: scan_banner
+version: scoring_v1
+llm_gate_score: 40
+daily_draft_cap: 500
+prompt_path: prompts/outreach_draft_v1.md
+
+weights:
+  exposed_winrm: 30
+  eol_software: 30
+  legacy_vpn: 25
+  windows_auth_leak: 20
+  weak_tls: 20
+  origin_no_waf: 10
+  http_server_error: 10
+  identified_cpe: 5
+  cdn_edge: -15
+  hyperscaler_unnamed: -20
+  hosted_platform_domain: -20
+
+hyperscaler_org_terms:
+  - alibaba
+  - aliyun
+  - amazon
+  - cloudflare
+  - digitalocean
+  - google
+  - hetzner
+  - linode
+  - microsoft
+  - ovh
+  - tencent
+  - vultr
+
+hosted_platform_domain_suffixes:
+  - amazonaws.com
+  - cloudflare.net
+  - cloudfront.net
+  - contaboserver.net
+  - googleusercontent.com
+  - linodeusercontent.com
+  - vultrusercontent.com

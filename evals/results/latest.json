@@ -1,0 +1,38 @@
+{
+  "evaluated_at": "2026-09-13T13:58:35.500618+00:00",
+  "rules_version": "scoring_v1",
+  "vertical": "cybersecurity",
+  "sample_records": 100,
+  "labelled_accounts": 25,
+  "contact_metrics": {
+    "true_positive": 4,
+    "false_positive": 0,
+    "false_negative": 1,
+    "true_negative": 20,
+    "precision": 1.0,
+    "recall": 0.8,
+    "f1": 0.8889
+  },
+  "signal_metrics": {
+    "true_positive": 45,
+    "false_positive": 0,
+    "false_negative": 0,
+    "true_negative": 0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0
+  },
+  "failures": [
+    {
+      "account_id": "domain:estpak.ee",
+      "expected_should_contact": true,
+      "predicted_should_contact": false,
+      "expected_signals": [
+        "legacy_vpn"
+      ],
+      "predicted_signals": [
+        "legacy_vpn"
+      ]
+    }
+  ]
+}
