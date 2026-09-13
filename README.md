@@ -32,6 +32,54 @@ pytest
 python evals/run_evals.py
 ```
 
+## Build the full-data DuckDB
+
+The full dump is streamed directly from zstd into a stripped `banner_fact`
+table. Raw HTML, certificate chains, favicons, and banner payloads are never
+stored. Account scores are materialized from the active vertical's YAML
+weights, so application queries do not rescan the archive.
+
+```bash
+python scripts/build_duckdb.py
+```
+
+Resource-safe defaults are deliberately conservative:
+
+- 2 DuckDB worker threads
+- 4 GB DuckDB memory limit
+- 5,000 banners per Python ingestion batch
+- 20 GB maximum temporary spill
+- refuse to start with less than 15 GiB free disk
+
+Override them only after measuring the machine:
+
+```bash
+python scripts/build_duckdb.py \
+  --threads 4 \
+  --memory_limit 8GB \
+  --max_temp_size 20GB \
+  --min_free_gib 15
+```
+
+For a safe parity run before processing the full archive:
+
+```bash
+python scripts/build_duckdb.py \
+  --source data/readable/shodan_100.jsonl \
+  --database data/signal_path_sample.duckdb \
+  --jsonl
+```
+
+Query only the materialized account table:
+
+```sql
+SELECT account_name, icp_score, signal_codes
+FROM account_score
+WHERE is_addressable AND icp_score >= 40
+ORDER BY icp_score DESC
+LIMIT 500;
+```
+
 ## Add another business use case
 
 1. `config/verticals/<id>.yaml` — weights, gate, prompt path, identity denylists.

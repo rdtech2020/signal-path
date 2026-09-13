@@ -29,7 +29,7 @@ DEFAULT_OUTPUT_DIR = Path("data/readable")
 DEFAULT_SUBSET_SIZE = 100
 READ_CHUNK_BYTES = 64 * 1024
 PROGRESS_EVERY = 500
-MAX_BUFFER_BYTES = 20 * 1024 * 1024
+MAX_BUFFER_BYTES = 128 * 1024 * 1024
 MIN_FREE_BYTES_FOR_FULL = 40 * 1024 * 1024 * 1024
 
 
@@ -86,13 +86,10 @@ def iter_json_objects(raw_stdout: Any) -> Iterator[dict]:
             return
         buffer += chunk.decode("utf-8", errors="replace")
         if len(buffer) > MAX_BUFFER_BYTES:
-            newline_at = buffer.find("\n{")
-            if newline_at == -1:
-                log(f"skipping oversized incomplete record ({len(buffer):,} chars)")
-                buffer = ""
-            else:
-                log(f"skipping oversized incomplete record, resync at {newline_at:,}")
-                buffer = buffer[newline_at + 1 :]
+            raise ValueError(
+                "one JSON record exceeded the 128 MiB safety limit; "
+                "aborting instead of silently dropping source data"
+            )
 
 
 def write_pretty_object(handle: TextIO, record: dict, first: bool) -> None:

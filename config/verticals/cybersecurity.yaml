@@ -2,7 +2,7 @@ id: cybersecurity
 label: Cybersecurity
 record_kind: scan_banner
 version: scoring_v1
-llm_gate_score: 40
+llm_gate_score: 80
 daily_draft_cap: 500
 prompt_path: prompts/outreach_draft_v1.md
 

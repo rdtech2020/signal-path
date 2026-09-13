@@ -15,6 +15,9 @@ class Settings:
     llm_monthly_budget_usd: float = float(os.getenv("LLM_MONTHLY_BUDGET_USD", "25"))
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
     trace_path: Path = Path(os.getenv("TRACE_PATH", "logs/traces.jsonl"))
+    database_path: Path = Path(
+        os.getenv("DATABASE_PATH", "data/signal_path.duckdb")
+    )
 
 
 settings = Settings()
