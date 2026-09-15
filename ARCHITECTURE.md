@@ -25,18 +25,21 @@ identity sanitization         src/identity.py
   • public apex domain only (dot required, placeholders/honeypots rejected)
         ▼
 signal extraction             src/verticals/cybersecurity.py
-  • one boolean column per catalog code
+  • one boolean column per catalog code, plus its human-readable detail
         ▼
 banner_fact (DuckDB)          src/duckdb_store.py
         │  GROUP BY account_id — SQL, not Python loops
         ▼
 account_score (DuckDB)
   • icp_score = clamp(Σ weight × flag, 0, 100)
-  • signal_codes[], ports[], ip_addresses[], country, org, banner_count
+  • signal_codes[] + signal_details[], ports[], ip_addresses[], org, country
         ▼
         addressable AND icp_score ≥ gate AND budget left?
               no ──► queue and dashboard only          ($0)
-              yes ─► outreach-draft skill (cheap model)
+              yes ─► brief shaping                     src/brief.py
+                     • signal-bearing ports first, tail reduced to a count
+                        ▼
+                     outreach-draft skill (cheap model)
                         ▼
                   logs/traces.jsonl — model, prompt version, tokens, cost
                         ▼
@@ -52,8 +55,8 @@ account_score (DuckDB)
 | Source | Single Zstd frame (XXH64) of concatenated JSON objects |
 | Size | 10.5 GiB compressed / 72.9 GiB uncompressed |
 | Banners ingested | 10,046,794 |
-| Serving store | `data/signal_path.duckdb` (432 MB) — `banner_fact` + `account_score` |
-| Full build time | ~10 minutes under the default resource caps |
+| Serving store | `data/signal_path.duckdb` (497 MB) — `banner_fact` + `account_score` |
+| Full build time | ~19 minutes under the default resource caps |
 
 **Grain: one JSON object is one banner** — one `ip_str`, one `port`, one service
 payload. It is not a company row. That single fact is why account rollup happens
@@ -132,7 +135,7 @@ scores the archive. A parity test asserts the two produce identical
 from the audited contract.
 
 The archive is streamed, never expanded. Ingest is the only full pass; serving
-queries hit typed columns in a 432 MB store.
+queries hit typed columns in a 497 MB store.
 
 ### 3.3 Sanitization belongs at identity time
 
@@ -150,7 +153,33 @@ reputation. `src/identity.py` enforces, in both engines:
 
 Rules live in the vertical config, so a new motion tunes them without code.
 
-### 3.4 Resource caps are part of the design
+### 3.4 The evidence text is data, not presentation
+
+Each rule emits a code *and* a sentence: `exposed_winrm` carries "Public Windows
+remote-management service on port 5986". Storing only the code was cheaper, but
+it forced the app to synthesize "Detected by deterministic rule: exposed_winrm"
+at read time, and a model given that string writes a generic email — the score
+was grounded while the draft was not.
+
+So `banner_fact` persists a `detail_<code>` column beside every flag, and the
+rollup lifts one detail per fired signal into `account_score.signal_details`,
+positionally aligned with `signal_codes`. Both engines now produce identical
+text, and the parity test asserts it, so the model reads the same evidence a
+salesperson would read in the UI.
+
+`src/brief.py` then shapes that evidence for a human: only ports a positive
+signal actually names are cited, and the tail becomes
+`additional_open_ports: <n>`. The effect on a real account, `012.net.il`:
+
+| | Before | After |
+|---|---|---|
+| Ports in prompt | 88 raw port numbers | `[8089, 1723]` plus `additional_open_ports: 86` |
+| Evidence text | "Detected by deterministic rule: eol_software" | "EOL-tagged software: nginx 1.18.0" |
+
+Port matching is deliberately narrow — it reads `port 8089` and ignores
+`returned HTTP 502`, because an HTTP status is not a port.
+
+### 3.5 Resource caps are part of the design
 
 A full load that swaps a laptop is not a working pipeline. Ingest holds at most
 one 5,000-row batch in Python, caps DuckDB at 4 GB and 2 threads, bounds spill
@@ -164,8 +193,8 @@ on a record larger than 128 MiB rather than silently skipping source data.
 | | Deterministic rules | LLM (`outreach-draft`) |
 |---|---|---|
 | Runs on | Every banner and every account | Addressable accounts past the gate, under a daily cap |
-| Job | Ports, tags, CPE, HTTP status, TLS, NTLM/PPTP/WinRM, WAF absence, identity, scoring | One short, evidence-grounded email from already-computed signals |
-| Cost | CPU only | Tokens — see §7 |
+| Job | Ports, tags, CPE, HTTP status, TLS, NTLM/PPTP/WinRM, WAF absence, identity, scoring | One short, evidence-grounded email from already-computed signal details |
+| Cost | CPU only | Tokens — see $7 |
 | Determinism | Required, for audit and evals | Structured output validated against a Pydantic schema |
 | Failure mode | Missed signal → fix the rule, re-run for free | Invented claim → prevented by passing only `signals[]`, never raw banners |
 
@@ -183,7 +212,7 @@ Weights are documented policy, not a fitted model. Score is clamped to 0–100.
 | `eol_software` | `tags` has `eol-product` | +30 |
 | `legacy_vpn` | `pptp` object, port 1723, or `tags` has `vpn` | +25 |
 | `windows_auth_leak` | `ntlm` object present | +20 |
-| `weak_tls` | expired cert, `self-signed` tag, or TLSv1/1.1 offered | +20 |
+| `weak_tls` | `self-signed` tag or TLSv1/1.1 offered (expiry: see §8) | +20 |
 | `origin_no_waf` | `http` present, no `http.waf`, not `cdn` | +10 |
 | `http_server_error` | `http.status` is 5xx | +10 |
 | `identified_cpe` | `cpe` non-empty | +5 |
@@ -217,7 +246,7 @@ traced per banner — that would be ten million rows — the persisted
   "trace_id": "tr_c0643904d6de4b31b5087880cfc23e71",
   "timestamp": "2026-09-15T17:57:01.524627+00:00",
   "skill_name": "outreach-draft",
-  "prompt_version": "outreach_draft_v1",
+  "prompt_version": "outreach_draft_v2",
   "model": "gpt-4o-mini",
   "vertical": "cybersecurity",
   "decision": "draft_outreach",
@@ -241,30 +270,61 @@ and deterministic signals; `response` is the validated draft object. Raw
 `data`, `http.html`, `ssl.chain`, and favicon bytes never reach the log — that
 is third-party content and it would bloat the file.
 
-Because `prompt_version`, `model`, tokens, and cost are mandatory, a v1-to-v2
-prompt comparison is a query over this file rather than a new instrumentation
-project.
+`prompt_version` is derived from the prompt filename named by the vertical
+config, so it cannot drift from the file that was actually sent. Because
+`prompt_version`, `model`, tokens, and cost are all mandatory, comparing
+`outreach_draft_v1` against `v2` is a query over this file rather than a new
+instrumentation project.
+
+Prompts are versioned as whole files. `v2` exists because the payload contract
+changed — real signal details arrived and ports became a short cited list plus a
+count — and editing `v1` in place would have made earlier traces
+uninterpretable. `v1` stays in the repository as the comparison baseline.
 
 ---
 
 ## 6. Evaluation
 
-`python evals/run_evals.py` scores 25 hand-labelled accounts from 40 fixture
-banners and writes `evals/results/latest.json`. Two metrics are reported:
+`python evals/run_evals.py` scores 31 hand-labelled accounts from 46 fixture
+banners and writes `evals/results/latest.json`.
 
-- **Signal extraction** — did the rules find exactly the expected signal codes?
-  Currently precision 1.00, recall 1.00, F1 1.00 across 45 signal decisions.
-  CI fails if this regresses.
-- **Contact policy** — would the account be queued for outreach? This compares
-  labels against the live gate, so it moves whenever gate policy moves.
+The label question is deliberately *not* "does the score exceed the gate?" —
+that would make the eval a tautology. It is the seller's question: **would you
+spend a touch on this account, and does the evidence plausibly belong to it?**
+Labels span both sides of the gate on purpose, and the fixture was extended
+with real high-scoring accounts pulled from the archive by
+`scripts/sample_eval_banners.py` so the boundary is actually exercised.
+
+**Signal extraction** — do the rules find exactly the expected codes? Precision
+1.00, recall 1.00, F1 1.00 across 71 signal decisions. This is the regression
+gate: CI fails if it drops.
+
+**Contact policy** — measured across a gate sweep, because the gate is a
+business lever and a single number hides the trade-off:
+
+| Gate | Precision | Recall | F1 | False positives |
+|---|---|---|---|---|
+| 20 | 0.64 | 1.00 | 0.78 | 4 |
+| 40 | **0.70** | **1.00** | **0.82** | 3 |
+| 60 | 0.63 | 0.71 | 0.67 | 3 |
+| 80 (active) | 0.50 | 0.29 | 0.36 | 2 |
+
+**What this measurement found.** Precision does not improve as the gate rises —
+it gets worse. The ≥ 80 band in this data is dominated by hosting and VPS
+providers (`thvps.com`, `vps.ac`) whose exposed management surface most likely
+belongs to a *tenant*, not to the provider as a buyer. Meanwhile four genuinely
+contactable accounts sit between 45 and 75 and are excluded. On this label set
+a gate of 40 is the better policy, and the real fix is a hosting-provider
+downrank signal rather than a higher threshold. The gate remains 80 in config
+until that signal exists, so the number is a documented choice and not an
+accident.
 
 The harness exits non-zero only on signal-extraction regression. Contact-policy
-disagreement is surfaced rather than enforced, because the gate is a business
-lever that is expected to be re-tuned.
+disagreement is reported, not enforced, for exactly the reason above.
 
-`pytest` (14 tests) covers identity sanitization, rollup and scoring,
-Python/SQL parity, private-IP rejection at ingest, tracing redaction, and the
-dashboard.
+`pytest` (21 tests) covers identity sanitization, rollup and scoring,
+Python/SQL parity including signal detail text, private-IP rejection at ingest,
+port summarization, tracing redaction, and the dashboard.
 
 ---
 
@@ -287,6 +347,12 @@ cost_per_draft = (652/1e6 × 0.150) + (78/1e6 × 0.600)
 Observed latency is 5.0–6.3 s per draft, and three completed drafts cost
 $0.00043 in total.
 
+Those traces were recorded under `outreach_draft_v1`, before ports were
+summarized — one of them shipped 88 ports into the prompt. The same account now
+sends two cited ports and `additional_open_ports: 86`, so 652 input tokens is
+now a ceiling rather than a mean. The figure is kept until live `v2` traces
+replace it, because budgeting against a stale *upper* bound is safe.
+
 | Scenario | Drafts | LLM cost |
 |---|---|---|
 | Daily cap (100/day) | 3,000 / month | **~$0.43 / month** |
@@ -307,25 +373,34 @@ API.
 
 ## 8. Known weaknesses
 
-1. **Contact-policy evals are stale against the current gate.** The 25 labels
-   were written when the gate was 40; the gate is now 80, so every labelled
-   positive now reads as a miss. The labels need re-review against the live
-   policy before contact precision/recall is quoted.
-2. **Signal detail text is lost on the SQL path.** `account_score` stores signal
-   *codes*, so the app reconstructs details as "Detected by deterministic rule:
-   <code>". The model therefore receives weaker evidence than the Python
-   extractor produces, and drafts read generically. Persisting detail strings is
-   the highest-value fix for draft quality.
-3. **Briefs carry too many ports.** Some accounts pass 30+ ports into the
-   prompt. That is telemetry, not a sales brief; ports should be summarized.
-4. **Near-duplicate high scorers.** Many top accounts share an identical signal
-   fingerprint. Signal-pattern deduplication, or one lead per org/ASN per
-   pattern, is required before a human works the list end to end.
-5. **Attribution remains the ceiling.** 1.38M of 1.59M accounts are IP-only.
-   Reliable company enrichment is needed before this is a primary lead source.
+1. **Hosting providers are not downranked by org.** The identity rules catch
+   provider *hostnames* (`amazonaws.com`) but not provider *businesses*
+   (`thvps.com`, `vps.ac`, `scw.cloud`). Their tenants' exposure scores as if it
+   were their own, which is the direct cause of the precision ceiling in §6.
+   This is the highest-value scoring fix outstanding.
+2. **The active gate is not the best gate on the label set.** Gate 80 measures
+   worse than 40 on both precision and recall (§6). It is currently justified by
+   queue volume, not by quality.
+3. **`weak_tls` cannot fire on expired certificates.** `normalize_banner`
+   strips the whole `ssl.cert` object to keep certificate content out of the
+   store, which also removes the `expired` boolean the rule documents. In
+   practice `weak_tls` only fires from the `self-signed` tag or a legacy TLS
+   version, so expiry-only accounts score 20 points low. The fix is to retain
+   `ssl.cert.expired` as a derived boolean while still dropping the certificate
+   itself; it needs a rebuild and a label re-check, so it is queued rather than
+   patched silently.
+4. **Near-duplicate high scorers.** All six ≥ 80 accounts sampled for the eval
+   set carried an identical four-signal fingerprint. Signal-pattern
+   deduplication, or one lead per org/ASN per pattern, is required before a
+   human works the list end to end.
+5. **Attribution remains the ceiling.** 1.38M of 1.59M accounts are IP-only, and
+   in several sampled accounts the domain and the `org` disagree about who owns
+   the host. Reliable company enrichment is needed before this is a primary lead
+   source.
 6. **No output-quality eval for generated drafts.** Structure is validated and
    claims are constrained by construction, but claim-grounding is not yet
-   measured against labelled examples.
+   measured against labelled examples, so the v1-to-v2 prompt change is
+   reasoned rather than proven.
 7. **Weights are provisional.** The base rates that shaped them came from a
    single short scan window; the full load supports their direction but has not
    been used to recalibrate them.
@@ -336,13 +411,16 @@ API.
 
 ## 9. Roadmap
 
-1. Re-review the 25 labels against the current gate and restore a defensible
-   contact precision/recall figure.
-2. Persist signal detail strings through to `account_score` and summarize ports,
-   then re-measure draft quality.
-3. Add a claim-grounding eval for `outreach_draft_v1`, and use it to justify a
-   v2 prompt file.
-4. Collapse duplicate signal fingerprints in the queue.
+1. Add a `hosting_provider_org` downrank signal so tenant exposure stops
+   scoring as the provider's own, then re-run the gate sweep and set the gate
+   from the curve instead of from volume.
+2. Retain `ssl.cert.expired` through normalization so `weak_tls` matches its
+   documented definition, then rebuild and re-check labels.
+3. Add a claim-grounding eval so `outreach_draft_v2` can be measured against
+   `v1` rather than argued about.
+3. Collapse duplicate signal fingerprints in the queue.
+4. Grow the label set beyond 31 accounts, weighted toward the 40–80 band where
+   the policy decisions actually live.
 5. Ingest a second snapshot and add change-over-time signals.
 
 ---

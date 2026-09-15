@@ -15,7 +15,13 @@ import duckdb
 
 from src.identity import is_hosted_platform, is_public_ip, is_sales_addressable
 from src.ingester import iter_json_objects, iter_jsonl, normalize_banner
-from src.scoring import account_identity, load_rules
+from src.scoring import (
+    AccountScore,
+    Signal,
+    account_identity,
+    identity_signals,
+    load_rules,
+)
 from src.verticals import get_extractor
 
 DEFAULT_BATCH_SIZE = 5_000
@@ -64,6 +70,10 @@ def _signal_codes(rules: dict[str, Any]) -> tuple[str, ...]:
     if invalid:
         raise ValueError(f"signal codes must be safe SQL identifiers: {invalid}")
     return codes
+
+
+def _detail_columns(signal_codes: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(f"detail_{code}" for code in signal_codes)
 
 
 def connect_database(
@@ -140,23 +150,16 @@ def _fact_row(
     org = str(normalized["org"]) if normalized.get("org") else None
 
     extractor = get_extractor(str(rules["id"]))
-    signal_names = set(extractor(normalized, rules))
-    hyperscaler_terms = tuple(rules.get("hyperscaler_org_terms") or ())
-    if (
-        not is_named
-        and "hyperscaler_unnamed" in signal_codes
-        and any(
-            term.casefold() in str(org or "").casefold()
-            for term in hyperscaler_terms
+    signals = dict(extractor(normalized, rules))
+    signals.update(
+        identity_signals(
+            is_named=is_named,
+            is_hosted=is_hosted_platform(account_name, rules),
+            org=org,
+            weights=rules["weights"],
+            hyperscaler_terms=tuple(rules.get("hyperscaler_org_terms") or ()),
         )
-    ):
-        signal_names.add("hyperscaler_unnamed")
-    if (
-        is_named
-        and is_hosted_platform(account_name, rules)
-        and "hosted_platform_domain" in signal_codes
-    ):
-        signal_names.add("hosted_platform_domain")
+    )
 
     return (
         account_id,
@@ -167,7 +170,11 @@ def _fact_row(
         org,
         ip_str,
         int(normalized["port"]),
-        *(code in signal_names for code in signal_codes),
+        *(code in signals for code in signal_codes),
+        *(
+            signals[code].detail if code in signals else None
+            for code in signal_codes
+        ),
     )
 
 
@@ -175,6 +182,9 @@ def _create_fact_table(
     connection: duckdb.DuckDBPyConnection, signal_codes: tuple[str, ...]
 ) -> None:
     signal_columns = ",\n".join(f"{code} BOOLEAN NOT NULL" for code in signal_codes)
+    detail_columns = ",\n".join(
+        f"{column} VARCHAR" for column in _detail_columns(signal_codes)
+    )
     connection.execute("DROP TABLE IF EXISTS account_score")
     connection.execute("DROP TABLE IF EXISTS banner_fact")
     connection.execute(
@@ -188,7 +198,8 @@ def _create_fact_table(
             org VARCHAR,
             ip_str VARCHAR NOT NULL,
             port INTEGER NOT NULL,
-            {signal_columns}
+            {signal_columns},
+            {detail_columns}
         )
         """
     )
@@ -234,7 +245,7 @@ def ingest_records(
     """Ingest normalized facts while retaining at most one batch in memory."""
     _validate_settings(DEFAULT_MEMORY_LIMIT, DEFAULT_MAX_TEMP_SIZE, 1, batch_size)
     signal_codes = _signal_codes(rules)
-    columns = BASE_COLUMNS + signal_codes
+    columns = BASE_COLUMNS + signal_codes + _detail_columns(signal_codes)
     _create_fact_table(connection, signal_codes)
 
     rows: list[tuple[object, ...]] = []
@@ -269,8 +280,20 @@ def materialize_account_scores(
         f"CAST({code} AS INTEGER) * {int(rules['weights'][code])}"
         for code in signal_codes
     )
+    detail_sql = ",\n".join(
+        f"ANY_VALUE(detail_{code}) FILTER (detail_{code} IS NOT NULL) "
+        f"AS detail_{code}"
+        for code in signal_codes
+    )
     signal_list_sql = ",\n".join(
         f"CASE WHEN {code} THEN {_sql_string(code)} ELSE NULL END"
+        for code in sorted(signal_codes)
+    )
+    # Details stay positionally aligned with signal_codes: both lists are built
+    # in sorted-code order and filtered on the same flag.
+    detail_list_sql = ",\n".join(
+        f"CASE WHEN {code} THEN COALESCE(detail_{code}, {_sql_string(code)}) "
+        "ELSE NULL END"
         for code in sorted(signal_codes)
     )
     connection.execute("DROP TABLE IF EXISTS account_score")
@@ -289,7 +312,8 @@ def materialize_account_scores(
                 LIST(DISTINCT port ORDER BY port) AS ports,
                 LIST(DISTINCT ip_str ORDER BY ip_str) AS ip_addresses,
                 COUNT(*) AS banner_count,
-                {flag_sql}
+                {flag_sql},
+                {detail_sql}
             FROM banner_fact
             GROUP BY account_id
         ),
@@ -300,7 +324,11 @@ def materialize_account_scores(
                 LIST_FILTER(
                     [{signal_list_sql}],
                     signal_code -> signal_code IS NOT NULL
-                ) AS signal_codes
+                ) AS signal_codes,
+                LIST_FILTER(
+                    [{detail_list_sql}],
+                    signal_detail -> signal_detail IS NOT NULL
+                ) AS signal_details
             FROM rolled_up
         )
         SELECT
@@ -315,6 +343,7 @@ def materialize_account_scores(
             ip_addresses,
             banner_count,
             signal_codes,
+            signal_details,
             {_sql_string(str(rules['id']))} AS vertical
         FROM scored
         """
@@ -436,12 +465,42 @@ def refresh_database_eligibility(database_path: Path) -> int:
         return refresh_sales_eligibility(connection)
 
 
+def account_from_row(
+    row: dict[str, Any], rules: dict[str, Any] | None = None
+) -> AccountScore:
+    """Rebuild the scoring contract from one materialized account row."""
+    weights = (rules or load_rules())["weights"]
+    codes = [str(code) for code in row["signal_codes"]]
+    details = [str(detail) for detail in row.get("signal_details") or ()]
+    return AccountScore(
+        account_id=str(row["account_id"]),
+        account_name=str(row["account_name"]),
+        is_named=bool(row["is_named"]),
+        is_addressable=bool(row["is_addressable"]),
+        icp_score=int(row["icp_score"]),
+        country_code=str(row["country_code"]) if row["country_code"] else None,
+        org=str(row["org"]) if row["org"] else None,
+        ports=tuple(int(port) for port in row["ports"]),
+        ip_addresses=tuple(str(address) for address in row["ip_addresses"]),
+        banner_count=int(row["banner_count"]),
+        signals=tuple(
+            Signal(
+                code=code,
+                weight=int(weights[code]),
+                detail=details[index] if index < len(details) else code,
+            )
+            for index, code in enumerate(codes)
+        ),
+        vertical=str(row["vertical"]),
+    )
+
+
 def query_qualified_accounts(
     database_path: Path,
     *,
     minimum_score: int | None = None,
     country_codes: tuple[str, ...] = (),
-    limit: int = 500,
+    limit: int = 100,
 ) -> list[dict[str, Any]]:
     """Read a small, ranked lead set; never load banner facts into Python."""
     rules = load_rules()
@@ -477,7 +536,7 @@ def query_ranked_accounts(
     minimum_score: int = 0,
     addressable_only: bool = True,
     country_codes: tuple[str, ...] = (),
-    limit: int = 500,
+    limit: int = 100,
 ) -> list[dict[str, Any]]:
     """Query a bounded account page without scanning facts in Python."""
     clauses = ["icp_score >= ?"]

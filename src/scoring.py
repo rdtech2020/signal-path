@@ -87,7 +87,7 @@ def account_identity(record: dict[str, Any]) -> tuple[str, str, bool]:
     return f"ip:{ip_str}", ip_str, False
 
 
-def _identity_signals(
+def identity_signals(
     *,
     is_named: bool,
     is_hosted: bool,
@@ -163,7 +163,7 @@ def score_accounts(
 
         org = next((banner.get("org") for banner in banners if banner.get("org")), None)
         merged_signals.update(
-            _identity_signals(
+            identity_signals(
                 is_named=is_named,
                 is_hosted=is_hosted,
                 org=str(org) if org else None,

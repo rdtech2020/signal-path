@@ -54,7 +54,12 @@ def test_duckdb_scoring_matches_python_contract(tmp_path):
         materialize_account_scores(connection, rules)
         sql_rows = connection.execute(
             """
-            SELECT account_id, icp_score, is_addressable, signal_codes
+            SELECT
+                account_id,
+                icp_score,
+                is_addressable,
+                signal_codes,
+                signal_details
             FROM account_score
             ORDER BY account_id
             """
@@ -72,11 +77,44 @@ def test_duckdb_scoring_matches_python_contract(tmp_path):
             account.icp_score,
             account.is_addressable,
             [signal.code for signal in account.signals],
+            [signal.detail for signal in account.signals],
         )
         for account in score_accounts(public_records)
     )
     assert banner_count == 2
     assert sql_rows == python_rows
+
+
+def test_persisted_details_describe_the_evidence(tmp_path):
+    """Codes alone make a generic brief; the SQL path must keep the wording."""
+    database_path = tmp_path / "signal_path.duckdb"
+    rules = load_rules()
+    with closing(
+        connect_database(
+            database_path,
+            memory_limit="512MB",
+            threads=1,
+            temp_directory=tmp_path / "spill",
+            max_temp_size="1GB",
+        )
+    ) as connection:
+        ingest_records(
+            connection,
+            [public_winrm_record()],
+            rules,
+            batch_size=100,
+            stage_path=tmp_path / "stage.csv",
+            progress_every=0,
+        )
+        materialize_account_scores(connection, rules)
+        codes, details = connection.execute(
+            "SELECT signal_codes, signal_details FROM account_score"
+        ).fetchone()
+
+    assert len(codes) == len(details)
+    winrm_detail = details[codes.index("exposed_winrm")]
+    assert "5985" in winrm_detail
+    assert "deterministic rule" not in winrm_detail
 
 
 def test_qualified_query_only_returns_addressable_results(tmp_path):

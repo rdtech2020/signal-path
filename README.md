@@ -17,11 +17,12 @@ same.
 | `scripts/build_duckdb.py` | Streams the compressed scan archive into DuckDB under fixed resource caps | Turns 10.5 GiB of compressed JSON into a queryable store without ever writing 73 GiB of text |
 | `src/identity.py` | Public-IP and public-apex-domain sanitization | A queue containing `localhost` or `10.0.0.7` destroys seller trust and sender reputation |
 | `src/scoring.py` + `config/verticals/cybersecurity.yaml` | Deterministic account rollup and weighted ICP score | Every number is reconstructable from config, so sales can audit a rank |
-| `src/duckdb_store.py` | SQL rollup and bounded queue queries | The dashboard reads 500 rows, never 10M banners |
+| `src/duckdb_store.py` | SQL rollup and bounded queue queries | The dashboard reads 100 rows, never 10M banners |
+| `src/brief.py` | Turns an account into a sales brief | 34 open ports is telemetry; two cited ports plus a count is a reason to call |
 | `skills/outreach-draft/SKILL.md` | Reusable, versioned AI workflow | Any agent can load the same trigger, inputs, and output contract |
-| `prompts/outreach_draft_v1.md` | Versioned prompt file | v2 becomes a new file, so drafts stay comparable |
+| `prompts/outreach_draft_v*.md` | Versioned prompt files | A new version is a new file, so past traces stay interpretable |
 | `src/llm_client.py` + `src/tracer.py` | Schema-validated generation with budget gates and JSONL tracing | Cost, latency, and claims are measurable per call |
-| `evals/` | 25 labelled accounts, 40 fixture banners, one-command harness | Scoring changes are measured, not asserted |
+| `evals/` | 31 labelled accounts, 46 fixture banners, one-command harness | Scoring changes are measured, not asserted |
 | `app.py` | Streamlit queue with score, signals, territory, and draft button | The product surface a seller actually uses |
 
 ## Current dataset in the store
@@ -37,7 +38,7 @@ Measured from `data/signal_path.duckdb`:
 | Score ≥ 40 and addressable | 27,707 |
 | Score ≥ 80 and addressable | 2,102 |
 | Countries represented | 229 |
-| Store size | 432 MB |
+| Store size | 497 MB |
 
 ## Quick start
 
@@ -69,8 +70,8 @@ weights, so serving queries never rescan the archive.
 python scripts/build_duckdb.py
 ```
 
-Defaults are deliberately conservative so a laptop stays usable during a
-ten-minute full load:
+Defaults are deliberately conservative so a laptop stays usable during the
+roughly twenty-minute full load:
 
 - 2 DuckDB worker threads
 - 4 GB DuckDB memory limit
@@ -100,11 +101,11 @@ python scripts/refresh_eligibility.py
 Serving reads only the materialized account table:
 
 ```sql
-SELECT account_name, icp_score, signal_codes, country_code
+SELECT account_name, icp_score, signal_codes, signal_details, country_code
 FROM account_score
 WHERE is_addressable AND icp_score >= 80
 ORDER BY icp_score DESC
-LIMIT 500;
+LIMIT 100;
 ```
 
 ## Verify
@@ -115,9 +116,25 @@ pytest
 python evals/run_evals.py
 ```
 
-`pytest` covers identity sanitization, scoring, the Python/SQL parity contract,
-tracing, and the dashboard. The eval harness writes `evals/results/latest.json`
-so successive prompt and weight versions stay comparable.
+`pytest` covers identity sanitization, scoring, the Python/SQL parity contract
+(including signal detail text), port summarization, tracing, and the dashboard.
+
+The eval harness writes `evals/results/latest.json`, which reports signal
+extraction metrics plus a contact-policy sweep across candidate gates. Signal
+extraction is the regression gate; the sweep exists because the outreach gate is
+a business trade-off, and `ARCHITECTURE.md` §6 explains what the current curve
+says about it.
+
+The labelled set spans both sides of that gate on purpose. Candidates for
+labelling are pulled from the archive with:
+
+```bash
+python scripts/sample_eval_banners.py --output /tmp/candidates.jsonl \
+  --minimum_score 80 --wanted 6
+```
+
+Labels themselves are written by hand — the question is whether a seller would
+spend a touch on the account, never whether the score cleared the gate.
 
 ## Deploy
 
@@ -155,4 +172,4 @@ dashboard.
 - `ARCHITECTURE.md` — data profile, rule/LLM split, cost model, weaknesses
 - `HOW_I_BUILD.md` — development loop and what it cost
 - `skills/outreach-draft/SKILL.md` — the reusable AI workflow
-- `prompts/outreach_draft_v1.md` — cybersecurity outreach prompt v1
+- `prompts/outreach_draft_v2.md` — active outreach prompt (`v1` kept for comparison)

@@ -25,8 +25,9 @@ Pass only this redacted account shape:
 {
   "account_name": "example.com",
   "country_code": "US",
-  "icp_score": 60,
+  "icp_score": 90,
   "ports": [5985],
+  "additional_open_ports": 12,
   "signals": [
     {
       "code": "exposed_winrm",
@@ -36,12 +37,15 @@ Pass only this redacted account shape:
 }
 ```
 
-Do not pass raw banners, HTML, certificates, NTLM values, IP addresses, or
-favicon data.
+`ports` carries only signal-bearing ports; the rest are summarized as the
+`additional_open_ports` count, because a 30-port list is telemetry rather than
+a reason to call. Do not pass raw banners, HTML, certificates, NTLM values, IP
+addresses, or favicon data.
 
 ## Workflow
 
-1. Load `prompts/outreach_draft_v1.md`.
+1. Load the prompt named by `prompt_path` in the active vertical config
+   (currently `prompts/outreach_draft_v2.md`; `v1` is retained for comparison).
 2. Confirm every factual claim maps to one supplied signal.
 3. Produce the required JSON object.
 4. Reject output containing an invented CVE, breach claim, or unsupported
@@ -68,8 +72,9 @@ Input:
 {
   "account_name": "example.com",
   "country_code": "US",
-  "icp_score": 60,
+  "icp_score": 90,
   "ports": [5985],
+  "additional_open_ports": 12,
   "signals": [
     {
       "code": "exposed_winrm",

@@ -4,7 +4,7 @@ record_kind: scan_banner
 version: scoring_v1
 llm_gate_score: 80
 daily_draft_cap: 100
-prompt_path: prompts/outreach_draft_v1.md
+prompt_path: prompts/outreach_draft_v2.md
 
 weights:
   exposed_winrm: 30

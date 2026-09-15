@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the deterministic baseline against the 25-account golden set."""
+"""Run the deterministic baseline against the hand-labelled golden set."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from src.scoring import load_rules, score_accounts
 DEFAULT_BANNERS = Path("evals/datasets/eval_banners.jsonl")
 DEFAULT_LABELS = Path("evals/datasets/accounts_labelled.jsonl")
 DEFAULT_RESULT = Path("evals/results/latest.json")
+GATE_SWEEP = (20, 40, 60, 80)
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,13 +87,28 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 }
             )
 
+    # The gate is a business lever, so report the curve rather than one point.
+    gate_sweep = {
+        str(candidate): classification_metrics(
+            expected_contact,
+            [
+                predictions[label["account_id"]].is_addressable
+                and predictions[label["account_id"]].icp_score >= candidate
+                for label in labels
+            ],
+        )
+        for candidate in GATE_SWEEP
+    }
+
     return {
         "evaluated_at": datetime.now(UTC).isoformat(),
         "rules_version": rules["version"],
         "vertical": rules.get("id"),
         "eval_banners": len(records),
         "labelled_accounts": len(labels),
+        "active_gate": gate,
         "contact_metrics": classification_metrics(expected_contact, predicted_contact),
+        "contact_metrics_by_gate": gate_sweep,
         "signal_metrics": set_metrics(expected_signals, predicted_signals),
         "failures": failures,
     }

@@ -9,45 +9,27 @@ import pandas as pd
 import streamlit as st
 
 from config.settings import settings
+from src.brief import evidence_ports
 from src.duckdb_store import (
+    account_from_row,
     query_country_codes,
     query_database_summary,
     query_qualified_accounts,
     query_ranked_accounts,
 )
 from src.llm_client import generate_outreach
-from src.scoring import AccountScore, Signal, load_rules
+from src.scoring import AccountScore, load_rules
 
 
 def database_accounts(rows: list[dict[str, object]]) -> list[AccountScore]:
     """Convert bounded query results to the app's existing account contract."""
-    weights = rules["weights"]
-    return [
-        AccountScore(
-            account_id=str(row["account_id"]),
-            account_name=str(row["account_name"]),
-            is_named=bool(row["is_named"]),
-            is_addressable=bool(row["is_addressable"]),
-            icp_score=int(row["icp_score"]),
-            country_code=(
-                str(row["country_code"]) if row["country_code"] else None
-            ),
-            org=str(row["org"]) if row["org"] else None,
-            ports=tuple(int(port) for port in row["ports"]),
-            ip_addresses=tuple(str(ip) for ip in row["ip_addresses"]),
-            banner_count=int(row["banner_count"]),
-            signals=tuple(
-                Signal(
-                    code=str(code),
-                    weight=int(weights[str(code)]),
-                    detail=f"Detected by deterministic rule: {code}",
-                )
-                for code in row["signal_codes"]
-            ),
-            vertical=str(row["vertical"]),
-        )
-        for row in rows
-    ]
+    return [account_from_row(row, rules) for row in rows]
+
+
+def port_label(account: AccountScore) -> str:
+    shown, withheld = evidence_ports(account.ports, account.signals)
+    label = ", ".join(map(str, shown))
+    return f"{label} (+{withheld})" if withheld else label
 
 
 def account_rows(accounts: list[AccountScore]) -> list[dict[str, object]]:
@@ -58,7 +40,7 @@ def account_rows(accounts: list[AccountScore]) -> list[dict[str, object]]:
             "addressable": account.is_addressable,
             "country": account.country_code,
             "org": account.org,
-            "ports": ", ".join(map(str, account.ports)),
+            "ports": port_label(account),
             "signals": ", ".join(signal.code for signal in account.signals),
             "banners": account.banner_count,
         }
@@ -145,7 +127,7 @@ else:
     st.json(
         {
             "score": selected.icp_score,
-            "ports": list(selected.ports),
+            "ports": port_label(selected),
             "signals": [
                 {"code": signal.code, "detail": signal.detail}
                 for signal in selected.signals

@@ -1,56 +1,99 @@
 # Product Plan
 
-**Product:** SignalPath — observational data in, ranked account queue out.
+**SignalPath** takes observational internet-exposure data and returns a ranked,
+explainable account queue.
 
-V1 ships the **cybersecurity** vertical. The same engine is meant to host later
-motions (for example payroll, payments, or IT operations) by swapping signal
-catalogs, not by forking the app.
+V1 ships the **cybersecurity** motion. The engine is built to host later motions
+(IT operations, payroll, payments) by swapping signal catalogs, not by forking
+the app.
 
-## User and decision
+## The user and the decision
 
-The primary user is a seller preparing a daily account queue. Their decision is
-not “which raw record looks unusual?” but “which attributable company has a
-concrete, defensible reason to talk today?”
+The user is a seller or SDR building a daily prospecting list at a cybersecurity
+software company. Their decision is not "which record looks unusual?" but:
 
-For cybersecurity that reason is attack-surface evidence. Another vertical would
-substitute its own buying signals and keep the same queue, gate, and outreach
-contract.
+> Which attributable company has a concrete, defensible reason to talk today,
+> and what do I say in the first line?
 
-## V1 use cases (cybersecurity)
+That framing drives everything below. In B2B prospecting the work splits into
+four steps, and the product mirrors them:
 
-1. **Prioritise named accounts** by externally observed risk signals.
-2. **Filter territory** by country and inspect exposed ports.
-3. **Explain every score** with deterministic evidence.
-4. **Draft outreach** only for high-priority, attributable accounts.
+| Prospecting step | In SignalPath |
+|---|---|
+| Define an ICP | Signal catalog and weights in `config/verticals/cybersecurity.yaml` |
+| Score and prioritise accounts | `icp_score` 0–100 per account, ranked queue |
+| Filter territory and segment | Country filter, score floor, addressable-only toggle |
+| Open the conversation | `outreach-draft` skill, gated and budgeted |
 
-## Why these use cases
+## Why this data supports that decision
 
-The source is banner telemetry, not firmographics. Most banners have no
-attributable company domain; the useful wedge is attack-surface evidence on
-named, public, sales-addressable accounts.
+The source is service-banner telemetry: one record is an IP plus a port plus a
+service payload. It is not a firmographic company row. There is no revenue,
+headcount, industry, or intent field to score.
 
-## ICP policy (cybersecurity)
+So the usable wedge is **externally observed attack surface** — public
+administration interfaces, exposed authentication metadata, legacy VPN, expired
+or self-signed TLS, end-of-life software, unshielded origins. These are exactly
+the reasons a security buyer takes a meeting, and they are visible in this data
+without enrichment.
 
-Named accounts with direct administration, authentication, legacy VPN, EOL, or
-TLS signals rank first. CDN edges, hyperscaler-owned IPs, and provider tenant
-hostnames are downranked. Geography is a salesperson-controlled filter rather
-than a model decision.
+The hard part is not detection. It is **attribution**. Of 1,585,994 rolled-up
+accounts, only 203,021 carry a name, and only 201,397 survive sanitization as
+sales-addressable. A technically correct finding on an unattributable IP is not
+a lead — and a finding on a hosting provider's tenant is worse, because it looks
+like a lead. That is why the labelled eval asks whether the evidence plausibly
+belongs to the account, not just whether a signal fired.
+
+## V1 use cases
+
+1. **Prioritise attributable accounts** by externally observed risk evidence.
+2. **Work a territory** by filtering country and inspecting exposed ports.
+3. **Explain every rank** from deterministic signals, with no model in the loop.
+4. **Draft the first touch** only for high-scoring, addressable accounts, under
+   an explicit budget.
+
+## ICP policy
+
+Rank first: accounts with direct administration exposure (WinRM), exposed
+Windows authentication metadata (NTLM), legacy VPN (PPTP), end-of-life software,
+or weak TLS.
+
+Rank down: CDN edges, hyperscaler-owned unnamed IPs, and provider tenant
+hostnames. These describe a hosting provider, not a buyer.
+
+Exclude entirely from the sellable queue: loopback and private address space,
+cloud metadata endpoints, placeholder names, non-public DNS suffixes, and
+honeypot domains. Geography stays a seller-controlled filter, never a model
+decision.
+
+## Rules, not a model, decide priority
+
+Scores are deterministic and cost nothing per account. That is a product
+decision as much as an engineering one: a seller will not trust a rank they
+cannot interrogate, and a sales manager cannot defend a quota built on an
+unexplainable number. The LLM writes prose from already-approved signals; it
+never computes or overrides a score.
 
 ## Success criteria
 
-- The DuckDB account queue is stable and queryable without loading raw JSON.
-- Every score can be reconstructed from `config/verticals/cybersecurity.yaml`.
-- A seller can see why an account is ranked without opening raw scan data.
-- LLM output contains no unsupported vulnerability or breach claim.
-- The eval harness runs with one command and reports contact precision/recall
-  and signal F1.
-- A second vertical can be added without changing `src/scoring.py`.
+- The account queue is stable, queryable, and served without loading raw JSON.
+- Every score is reconstructable from the vertical's YAML config.
+- A seller can see why an account ranks without opening raw scan data, in the
+  same words the outreach model is given.
+- Nothing in the queue is a private, placeholder, or unroutable identity.
+- A brief names the ports that carry evidence and summarizes the rest, rather
+  than pasting a port scan into an email.
+- Generated drafts contain no vulnerability, breach, or version claim that is
+  not backed by a deterministic signal.
+- One command reruns the eval harness and reports comparable metrics, including
+  how the outreach gate trades precision against recall.
+- A second motion can be added without editing `src/scoring.py`.
 
 ## Out of scope for V1
 
-- Claiming the dump represents the full internet.
-- Contact enrichment or guessing people from domains.
-- CVE matching from empty `opts.vulns` values.
-- Loading the 73 GiB uncompressed dump into memory.
+- Claiming this archive represents the whole internet.
+- Contact enrichment or inferring people from domains.
+- CVE matching — `opts.vulns` is empty everywhere it appears in this data.
+- Expanding the archive to raw JSON on disk.
 - Using an LLM to calculate risk scores.
-- Shipping a second live vertical before the cybersecurity evals are reviewed.
+- Launching a second live vertical before the cybersecurity labels are reviewed.

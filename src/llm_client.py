@@ -10,10 +10,10 @@ from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
 from config.settings import Settings, settings
+from src.brief import evidence_ports
 from src.scoring import AccountScore, load_rules
 from src.tracer import current_day_decision_count, current_month_cost, write_trace
 
-PROMPT_VERSION = "outreach_draft_v1"
 SKILL_NAME = "outreach-draft"
 INPUT_PRICE_PER_MILLION = 0.150
 OUTPUT_PRICE_PER_MILLION = 0.600
@@ -37,11 +37,13 @@ def estimate_cost(prompt_tokens: int, completion_tokens: int) -> float:
 
 
 def _safe_payload(account: AccountScore) -> dict[str, object]:
+    cited_ports, withheld_ports = evidence_ports(account.ports, account.signals)
     return {
         "account_name": account.account_name,
         "country_code": account.country_code,
         "icp_score": account.icp_score,
-        "ports": list(account.ports),
+        "ports": list(cited_ports),
+        "additional_open_ports": withheld_ports,
         "signals": [
             {"code": signal.code, "detail": signal.detail}
             for signal in account.signals
@@ -71,6 +73,7 @@ def generate_outreach(
         raise RuntimeError("OPENAI_API_KEY is not configured")
 
     prompt = prompt_file.read_text(encoding="utf-8")
+    prompt_version = prompt_file.stem
     payload = _safe_payload(account)
     client = OpenAI(api_key=app_settings.openai_api_key)
     started_at = time.perf_counter()
@@ -112,7 +115,7 @@ def generate_outreach(
                 "model": app_settings.llm_model,
                 "output_status": status,
                 "prompt_tokens": prompt_tokens,
-                "prompt_version": PROMPT_VERSION,
+                "prompt_version": prompt_version,
                 "request": payload,
                 "response": response_payload,
                 "signals": [signal.code for signal in account.signals],
