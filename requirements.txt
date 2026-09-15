@@ -1,0 +1,11 @@
+# Runtime dependencies for hosted deploys (Streamlit Community Cloud and
+# similar). Kept in step with the runtime list in pyproject.toml; dev tools
+# (pytest, ruff) are deliberately excluded.
+#
+# This file also decides the installer: with it present the host uses pip, so
+# it will not try to install the repository itself as a package.
+duckdb>=1.1
+openai>=1.50
+pydantic>=2.8
+pyyaml>=6.0
+streamlit>=1.38

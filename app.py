@@ -19,6 +19,7 @@ from src.duckdb_store import (
 )
 from src.llm_client import generate_outreach
 from src.scoring import AccountScore, load_rules
+from src.store_fetch import ensure_database
 
 
 def database_accounts(rows: list[dict[str, object]]) -> list[AccountScore]:
@@ -59,12 +60,40 @@ st.caption(
 )
 
 gate = int(rules["llm_gate_score"])
-database_path = Path(os.getenv("DATABASE_PATH", str(settings.database_path)))
-if not database_path.exists():
-    st.error(
-        f"DuckDB not found at {database_path}. "
-        "Build it with `python scripts/build_duckdb.py`."
+
+
+@st.cache_resource(show_spinner=False)
+def prepared_database(path_text: str, url: str | None) -> str:
+    """Download the store once per container; local runs use the built file."""
+    target = Path(path_text)
+    if target.exists() or not url:
+        return str(ensure_database(target, url))
+
+    status = st.status("Downloading the account store…", expanded=True)
+    progress = status.progress(0.0)
+
+    def report(received: int, total: int) -> None:
+        received_mib = received / 1024**2
+        if total:
+            progress.progress(min(received / total, 1.0))
+            status.write(f"{received_mib:,.0f} of {total / 1024**2:,.0f} MiB")
+        else:
+            status.write(f"{received_mib:,.0f} MiB")
+
+    resolved = ensure_database(target, url, on_progress=report)
+    status.update(label="Account store ready", state="complete", expanded=False)
+    return str(resolved)
+
+
+try:
+    database_path = Path(
+        prepared_database(
+            os.getenv("DATABASE_PATH", str(settings.database_path)),
+            os.getenv("DATABASE_URL", settings.database_url),
+        )
     )
+except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+    st.error(str(exc))
     st.stop()
 
 score_floor = st.sidebar.slider("Minimum score", 0, 100, 0, 5)

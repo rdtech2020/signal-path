@@ -18,6 +18,9 @@ class Settings:
     database_path: Path = Path(
         os.getenv("DATABASE_PATH", "data/signal_path.duckdb")
     )
+    # Hosted deploys have no archive to build from, so they pull a prebuilt
+    # store. Streamlit exposes secrets as environment variables.
+    database_url: str | None = os.getenv("DATABASE_URL")
 
 
 settings = Settings()

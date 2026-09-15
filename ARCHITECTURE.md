@@ -425,7 +425,28 @@ API.
 
 ---
 
-## 10. Adding a vertical
+## 10. Deployment
+
+The ingest pipeline and the serving app have different requirements, so they are
+separated at the artifact boundary: ingest needs the 10.5 GiB archive, `zstd`,
+and twenty minutes; serving needs one 497 MB file and a few hundred megabytes of
+RAM.
+
+Locally that file is built in place. In a container it is mounted. On a platform
+with only ephemeral disk, `src/store_fetch.py` downloads it from `DATABASE_URL`
+on first run, validates that `account_score` and `banner_fact` are present, and
+renames it into place only after validation, so an interrupted download cannot
+masquerade as a store. Streamlit caches the result per container, making the
+cost a one-time cold start rather than a per-user delay.
+
+Gzip halves the transfer (474 MiB to 234 MiB) and is decompressed during the
+download, so no intermediate copy is written. The consequence worth stating:
+the hosted queue is only as fresh as the last uploaded store. Refreshing it is a
+rebuild plus an upload, not a deploy.
+
+---
+
+## 11. Adding a vertical
 
 Industry logic stays out of the engine.
 
