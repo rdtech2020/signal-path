@@ -14,13 +14,11 @@ data/b2_download_file_by_id
 data/*.duckdb
 data/*.duckdb.wal
 data/duckdb_tmp/
-data/readable/*
-!data/readable/shodan_100.jsonl
-data/readable/shodan_sample_pretty.json
+data/readable/
 project-task/
 
 # Runtime output
-logs/*.jsonl
+# logs/*.jsonl # Keeping for example
 
 # Editor / OS
 .DS_Store

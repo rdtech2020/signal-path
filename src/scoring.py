@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ipaddress
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
@@ -12,6 +11,7 @@ from typing import Any
 import yaml
 
 from config.settings import settings
+from src.identity import is_hosted_platform, is_ip_address, is_sales_addressable
 
 VERTICALS_DIR = Path("config/verticals")
 
@@ -71,41 +71,26 @@ def _first_text(values: object) -> str | None:
     return next((value for value in values if isinstance(value, str) and value), None)
 
 
-def _is_ip_address(value: str) -> bool:
-    try:
-        ipaddress.ip_address(value)
-    except ValueError:
-        return False
-    return True
-
-
 def account_identity(record: dict[str, Any]) -> tuple[str, str, bool]:
     """Return stable account_id, display name, and whether it is named."""
     domain = _first_text(record.get("domains"))
     normalized_domain = domain.lower().strip(".") if domain else None
-    if normalized_domain and not _is_ip_address(normalized_domain):
+    if normalized_domain and not is_ip_address(normalized_domain):
         return f"domain:{normalized_domain}", normalized_domain, True
 
     hostname = _first_text(record.get("hostnames"))
     normalized_hostname = hostname.lower().strip(".") if hostname else None
-    if normalized_hostname and not _is_ip_address(normalized_hostname):
+    if normalized_hostname and not is_ip_address(normalized_hostname):
         return f"domain:{normalized_hostname}", normalized_hostname, True
 
     ip_str = str(record.get("ip_str") or "unknown")
     return f"ip:{ip_str}", ip_str, False
 
 
-def _is_hosted_platform(account_name: str, suffixes: tuple[str, ...]) -> bool:
-    return any(
-        account_name == suffix or account_name.endswith(f".{suffix}")
-        for suffix in suffixes
-    )
-
-
 def _identity_signals(
     *,
     is_named: bool,
-    is_addressable: bool,
+    is_hosted: bool,
     org: str | None,
     weights: dict[str, Any],
     hyperscaler_terms: tuple[str, ...],
@@ -124,7 +109,7 @@ def _identity_signals(
             weight=int(weights[code]),
             detail="Unnamed asset belongs to a hyperscaler network",
         )
-    if is_named and not is_addressable and "hosted_platform_domain" in weights:
+    if is_named and is_hosted and "hosted_platform_domain" in weights:
         code = "hosted_platform_domain"
         signals[code] = Signal(
             code=code,
@@ -155,14 +140,22 @@ def score_accounts(
         identities[account_id] = (account_name, is_named)
 
     hyperscaler_terms = tuple(active_rules.get("hyperscaler_org_terms") or ())
-    hosted_suffixes = tuple(active_rules.get("hosted_platform_domain_suffixes") or ())
     weights = active_rules["weights"]
     scored_accounts: list[AccountScore] = []
 
     for account_id, banners in groups.items():
         account_name, is_named = identities[account_id]
-        is_addressable = is_named and not _is_hosted_platform(
-            account_name, hosted_suffixes
+        ip_addresses = tuple(
+            sorted(
+                {str(banner["ip_str"]) for banner in banners if banner.get("ip_str")}
+            )
+        )
+        is_hosted = is_hosted_platform(account_name, active_rules)
+        is_addressable = is_sales_addressable(
+            account_name,
+            ip_addresses,
+            active_rules,
+            is_named=is_named,
         )
         merged_signals: dict[str, Signal] = {}
         for banner in banners:
@@ -172,7 +165,7 @@ def score_accounts(
         merged_signals.update(
             _identity_signals(
                 is_named=is_named,
-                is_addressable=is_addressable,
+                is_hosted=is_hosted,
                 org=str(org) if org else None,
                 weights=weights,
                 hyperscaler_terms=hyperscaler_terms,
@@ -196,11 +189,6 @@ def score_accounts(
                     for banner in banners
                     if isinstance(banner.get("port"), int)
                 }
-            )
-        )
-        ip_addresses = tuple(
-            sorted(
-                {str(banner["ip_str"]) for banner in banners if banner.get("ip_str")}
             )
         )
 

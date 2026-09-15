@@ -3,7 +3,7 @@ label: Cybersecurity
 record_kind: scan_banner
 version: scoring_v1
 llm_gate_score: 80
-daily_draft_cap: 500
+daily_draft_cap: 100
 prompt_path: prompts/outreach_draft_v1.md
 
 weights:
@@ -41,3 +41,46 @@ hosted_platform_domain_suffixes:
   - googleusercontent.com
   - linodeusercontent.com
   - vultrusercontent.com
+
+placeholder_account_names:
+  - "-"
+  - anonymized
+  - default
+  - dummy
+  - example
+  - hostname
+  - invalid
+  - local
+  - localhost
+  - n/a
+  - na
+  - none
+  - null
+  - redacted
+  - test
+  - undefined
+  - unknown
+
+non_public_domain_suffixes:
+  - arpa
+  - example
+  - example.com
+  - example.net
+  - example.org
+  - home
+  - internal
+  - intranet
+  - invalid
+  - lan
+  - local
+  - localdomain
+  - localhost
+  - test
+
+honeypot_domain_suffixes:
+  - canarytokens.com
+  - canarytokens.org
+  - honeypot
+  - sinkhole
+  - spamtrap
+  - thinkst.com

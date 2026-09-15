@@ -10,6 +10,40 @@ from typing import Any
 SENSITIVE_FIELDS = {"data"}
 SENSITIVE_HTTP_FIELDS = {"html", "favicon"}
 SENSITIVE_SSL_FIELDS = {"chain", "chain_sha256", "cert"}
+READ_CHUNK_BYTES = 64 * 1024
+MAX_BUFFER_BYTES = 128 * 1024 * 1024
+
+
+def iter_json_objects(raw_stdout: Any) -> Iterator[dict[str, Any]]:
+    """Decode concatenated JSON objects from a binary stream."""
+    decoder = json.JSONDecoder()
+    buffer = ""
+
+    while True:
+        cursor = 0
+        while True:
+            while cursor < len(buffer) and buffer[cursor].isspace():
+                cursor += 1
+            if cursor >= len(buffer):
+                buffer = ""
+                break
+            try:
+                record, next_cursor = decoder.raw_decode(buffer, cursor)
+            except json.JSONDecodeError:
+                buffer = buffer[cursor:]
+                break
+            cursor = next_cursor
+            if isinstance(record, dict):
+                yield record
+        chunk = raw_stdout.read(READ_CHUNK_BYTES)
+        if not chunk:
+            return
+        buffer += chunk.decode("utf-8", errors="replace")
+        if len(buffer) > MAX_BUFFER_BYTES:
+            raise ValueError(
+                "one JSON record exceeded the 128 MiB safety limit; "
+                "aborting instead of silently dropping source data"
+            )
 
 
 def iter_jsonl(path: Path) -> Iterator[dict[str, Any]]:

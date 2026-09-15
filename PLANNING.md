@@ -25,11 +25,9 @@ contract.
 
 ## Why these use cases
 
-The 100-record sample is banner telemetry, not firmographics. Only 25 of 85
-rolled-up accounts have a syntactic domain and only 18 are considered
-addressable after removing provider-owned hostnames. The useful wedge is
-therefore attack-surface evidence, not employee count, revenue, or intent data
-that the dataset does not contain.
+The source is banner telemetry, not firmographics. Most banners have no
+attributable company domain; the useful wedge is attack-surface evidence on
+named, public, sales-addressable accounts.
 
 ## ICP policy (cybersecurity)
 
@@ -40,7 +38,7 @@ than a model decision.
 
 ## Success criteria
 
-- The 100 banners produce a stable account queue.
+- The DuckDB account queue is stable and queryable without loading raw JSON.
 - Every score can be reconstructed from `config/verticals/cybersecurity.yaml`.
 - A seller can see why an account is ranked without opening raw scan data.
 - LLM output contains no unsupported vulnerability or breach claim.
@@ -50,7 +48,7 @@ than a model decision.
 
 ## Out of scope for V1
 
-- Claiming the sample represents the full internet scan.
+- Claiming the dump represents the full internet.
 - Contact enrichment or guessing people from domains.
 - CVE matching from empty `opts.vulns` values.
 - Loading the 73 GiB uncompressed dump into memory.

@@ -13,14 +13,14 @@ from evals.metrics import classification_metrics, set_metrics
 from src.ingester import load_records, normalize_banner
 from src.scoring import load_rules, score_accounts
 
-DEFAULT_SAMPLE = Path("data/readable/shodan_100.jsonl")
+DEFAULT_BANNERS = Path("evals/datasets/eval_banners.jsonl")
 DEFAULT_LABELS = Path("evals/datasets/accounts_labelled.jsonl")
 DEFAULT_RESULT = Path("evals/results/latest.json")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate account scoring.")
-    parser.add_argument("--sample", type=Path, default=DEFAULT_SAMPLE)
+    parser.add_argument("--banners", type=Path, default=DEFAULT_BANNERS)
     parser.add_argument("--labels", type=Path, default=DEFAULT_LABELS)
     parser.add_argument("--result", type=Path, default=DEFAULT_RESULT)
     parser.add_argument("--vertical", default=None)
@@ -36,7 +36,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     rules = load_rules(vertical=args.vertical)
     records = [
         normalized
-        for record in load_records(args.sample)
+        for record in load_records(args.banners)
         if (normalized := normalize_banner(record)) is not None
     ]
     predictions = {
@@ -50,7 +50,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         if label["account_id"] not in predictions
     ]
     if missing:
-        raise ValueError(f"labelled accounts missing from sample: {missing}")
+        raise ValueError(f"labelled accounts missing from eval banners: {missing}")
 
     gate = int(rules["llm_gate_score"])
     expected_contact: list[bool] = []
@@ -90,7 +90,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "evaluated_at": datetime.now(UTC).isoformat(),
         "rules_version": rules["version"],
         "vertical": rules.get("id"),
-        "sample_records": len(records),
+        "eval_banners": len(records),
         "labelled_accounts": len(labels),
         "contact_metrics": classification_metrics(expected_contact, predicted_contact),
         "signal_metrics": set_metrics(expected_signals, predicted_signals),

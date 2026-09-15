@@ -11,10 +11,10 @@ COPY pyproject.toml ./
 COPY config ./config
 COPY src ./src
 COPY prompts ./prompts
-COPY data/readable/shodan_100.jsonl ./data/readable/shodan_100.jsonl
+COPY skills ./skills
 COPY app.py ./
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . && mkdir -p data logs
 
 EXPOSE 8501
 

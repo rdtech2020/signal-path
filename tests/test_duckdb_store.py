@@ -1,5 +1,4 @@
 from contextlib import closing
-from pathlib import Path
 
 from src.duckdb_store import (
     connect_database,
@@ -7,15 +6,34 @@ from src.duckdb_store import (
     materialize_account_scores,
     query_qualified_accounts,
 )
-from src.ingester import load_records, normalize_banner
+from src.ingester import normalize_banner
 from src.scoring import load_rules, score_accounts
+from tests.test_scoring import public_winrm_record
 
-SAMPLE_PATH = Path("data/readable/shodan_100.jsonl")
+
+def _records() -> list[dict]:
+    return [
+        public_winrm_record(),
+        {
+            "ip_str": "1.1.1.1",
+            "port": 443,
+            "domains": ["cdn-edge.net"],
+            "tags": ["cdn"],
+            "http": {"status": 200},
+            "ssl": {"cert": {"expired": True}},
+        },
+        {
+            "ip_str": "10.0.0.7",
+            "port": 80,
+            "domains": ["internal.corp"],
+        },
+    ]
 
 
 def test_duckdb_scoring_matches_python_contract(tmp_path):
     database_path = tmp_path / "signal_path.duckdb"
     rules = load_rules()
+    records = _records()
     with closing(
         connect_database(
             database_path,
@@ -27,40 +45,41 @@ def test_duckdb_scoring_matches_python_contract(tmp_path):
     ) as connection:
         banner_count = ingest_records(
             connection,
-            load_records(SAMPLE_PATH),
+            records,
             rules,
             batch_size=100,
             stage_path=tmp_path / "stage.csv",
             progress_every=0,
         )
-        account_count = materialize_account_scores(connection, rules)
+        materialize_account_scores(connection, rules)
         sql_rows = connection.execute(
             """
-            SELECT account_id, icp_score, signal_codes
+            SELECT account_id, icp_score, is_addressable, signal_codes
             FROM account_score
             ORDER BY account_id
             """
         ).fetchall()
 
-    normalized_records = [
-        normalized
-        for record in load_records(SAMPLE_PATH)
-        if (normalized := normalize_banner(record)) is not None
-    ]
+        public_records = [
+            normalized
+            for record in records
+            if record["ip_str"] != "10.0.0.7"
+            and (normalized := normalize_banner(record)) is not None
+        ]
     python_rows = sorted(
         (
             account.account_id,
             account.icp_score,
+            account.is_addressable,
             [signal.code for signal in account.signals],
         )
-        for account in score_accounts(normalized_records)
+        for account in score_accounts(public_records)
     )
-    assert banner_count == 100
-    assert account_count == 85
+    assert banner_count == 2
     assert sql_rows == python_rows
 
 
-def test_qualified_query_only_returns_small_addressable_result(tmp_path):
+def test_qualified_query_only_returns_addressable_results(tmp_path):
     database_path = tmp_path / "signal_path.duckdb"
     rules = load_rules()
     with closing(
@@ -74,7 +93,7 @@ def test_qualified_query_only_returns_small_addressable_result(tmp_path):
     ) as connection:
         ingest_records(
             connection,
-            load_records(SAMPLE_PATH),
+            _records(),
             rules,
             batch_size=100,
             stage_path=tmp_path / "stage.csv",
@@ -82,7 +101,37 @@ def test_qualified_query_only_returns_small_addressable_result(tmp_path):
         )
         materialize_account_scores(connection, rules)
 
-    accounts = query_qualified_accounts(database_path)
-    assert len(accounts) == 4
+    accounts = query_qualified_accounts(database_path, minimum_score=40)
+    assert accounts
     assert all(account["is_addressable"] for account in accounts)
     assert all(account["icp_score"] >= 40 for account in accounts)
+    assert all(account["account_name"] != "localhost" for account in accounts)
+
+
+def test_private_ips_are_dropped_during_duckdb_ingest(tmp_path):
+    database_path = tmp_path / "signal_path.duckdb"
+    rules = load_rules()
+    with closing(
+        connect_database(
+            database_path,
+            memory_limit="512MB",
+            threads=1,
+            temp_directory=tmp_path / "spill",
+            max_temp_size="1GB",
+        )
+    ) as connection:
+        count = ingest_records(
+            connection,
+            [
+                {"ip_str": "10.0.0.7", "port": 80, "domains": ["internal.corp"]},
+                {"ip_str": "127.0.0.1", "port": 80, "hostnames": ["localhost"]},
+                {"ip_str": "8.8.8.8", "port": 443, "domains": ["dns.google"]},
+            ],
+            rules,
+            batch_size=100,
+            stage_path=tmp_path / "stage.csv",
+            progress_every=0,
+        )
+        assert count == 1
+        stored = connection.execute("SELECT ip_str FROM banner_fact").fetchall()
+        assert stored == [("8.8.8.8",)]

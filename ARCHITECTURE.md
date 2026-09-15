@@ -1,276 +1,363 @@
 # Architecture
 
-**SignalPath** turns observational records into a ranked, explainable sales
-queue. The engine (identity, account rollup, gating, tracing, outreach) is
-vertical-agnostic. **Cybersecurity** is the first plugin: it scores
-Shodan-style scan banners. Other motions add a YAML catalog plus a signal
-extractor; they do not fork the app.
+SignalPath converts internet-exposure telemetry into a ranked, explainable
+account queue. The engine — identity, rollup, scoring, gating, tracing, outreach
+— is vertical-agnostic. **Cybersecurity** is the first plugin: a YAML signal
+catalog plus a record-level extractor. A new sales motion adds those two files;
+it does not fork the app.
 
-**Current scope: the 100-record cybersecurity sample only.** Every number in
-§1 and §3 is measured on `data/readable/shodan_100_pretty.json` (n = 100).
-Full-dump figures are labelled as projections.
+Serving reads one artifact: `data/signal_path.duckdb`.
 
 ---
 
-## 1. The data
+## 1. Component map
+
+```
+compressed scan archive (10.5 GiB zstd, 72.9 GiB of JSON)
+        │  streamed via `zstd -d -c`; raw JSON never lands on disk
+        ▼
+ingest + normalize            src/ingester.py
+  • strip data, http.html, http.favicon, ssl.chain, ssl.cert
+  • drop records without ip_str / port
+        ▼
+identity sanitization         src/identity.py
+  • public routable IP only (no loopback, RFC1918, link-local, IMDS)
+  • public apex domain only (dot required, placeholders/honeypots rejected)
+        ▼
+signal extraction             src/verticals/cybersecurity.py
+  • one boolean column per catalog code
+        ▼
+banner_fact (DuckDB)          src/duckdb_store.py
+        │  GROUP BY account_id — SQL, not Python loops
+        ▼
+account_score (DuckDB)
+  • icp_score = clamp(Σ weight × flag, 0, 100)
+  • signal_codes[], ports[], ip_addresses[], country, org, banner_count
+        ▼
+        addressable AND icp_score ≥ gate AND budget left?
+              no ──► queue and dashboard only          ($0)
+              yes ─► outreach-draft skill (cheap model)
+                        ▼
+                  logs/traces.jsonl — model, prompt version, tokens, cost
+                        ▼
+        ranked queue in app.py (bounded to 100 rows per view)
+```
+
+---
+
+## 2. The data
 
 | Item | Value |
 |---|---|
-| Source dump | `data/b2_download_file_by_id` — single Zstd frame (XXH64), concatenated JSON objects |
-| Dump size | 10.5 GiB compressed / **72.9 GiB** uncompressed |
-| Dump population | **~10.3 million banners** (projected from 1.3M objects scanned at ~7–8 KB each; exact count needs a full 73 GiB decompress) |
-| Working sample | `data/readable/shodan_100.jsonl`, `data/readable/shodan_100_pretty.json` — **n = 100** |
-| Regenerate sample | `python3 scripts/convert_shodan_to_json.py --subset_size 100` |
+| Source | Single Zstd frame (XXH64) of concatenated JSON objects |
+| Size | 10.5 GiB compressed / 72.9 GiB uncompressed |
+| Banners ingested | 10,046,794 |
+| Serving store | `data/signal_path.duckdb` (432 MB) — `banner_fact` + `account_score` |
+| Full build time | ~10 minutes under the default resource caps |
 
-The dump is never loaded whole: `scripts/convert_shodan_to_json.py` streams `zstd -d -c` and decodes objects incrementally.
+**Grain: one JSON object is one banner** — one `ip_str`, one `port`, one service
+payload. It is not a company row. That single fact is why account rollup happens
+before scoring.
 
-**Grain: one JSON object = one banner** (one `ip_str` + `port` + service payload). It is not a firmographic company row. Sample scan window is a single ~40-second slice (`2026-09-07T06:59:27Z – 07:00:07Z`); `transport` is `tcp` on all 100.
+### 2.1 What set the v1 weights
 
-### 1.1 Field coverage (n = 100)
+Weights were derived from a hand-reviewed 100-banner profiling slice before the
+full load, because base rates are what make a weight defensible rather than
+invented. That slice was a single ~40-second scan window, so it justifies the
+*shape* of the catalog, not final calibration.
 
-| Field | Present | Sales use |
+| Observation in the profiling slice | Count | Engineering read |
 |---|---|---|
-| `ip_str`, `port`, `org`, `isp`, `location` | 100 | Always available |
-| `asn` | 93 | Territory / routing |
-| `domains`, `hostnames` (non-empty) | **41** | Named account |
-| `http` | 37 | Web stack, errors, WAF |
-| `tags` | 36 | `cloud`, `cdn`, `vpn`, `eol-product`, `self-signed` |
-| `product` | 34 | nginx, WinRM, PPTP, … |
-| `cloud` | 23 | Hosting provider — **not** the buyer |
-| `cpe` / `cpe23` | 20 | Software inventory |
-| `ssl` | 9 | Cert / protocol posture |
-| `ntlm` | 9 | Windows auth exposure |
-| `pptp` | 4 | Legacy VPN |
-| `os` (non-null) | 9 | Too sparse to rely on |
-
-**59 of 100 banners have no domain or hostname.** One additional `domains` value is an IP with a trailing dot, and seven domains are provider-owned hostnames. Hyperscaler `org` is hosting, not an ICP: `Google LLC` alone accounts for 15 banners. Those are cloud IPs, not 15 prospects.
-
-### 1.2 Signal base rates (n = 100)
-
-Observed frequencies, which is what makes a weight defensible rather than invented.
-
-| Observation | Count | Engineering note |
-|---|---|---|
+| No domain or hostname | 59 of 100 | Attribution, not detection, is the bottleneck |
 | Port outside `{80,443,8080,8443}` | 91 | Meaningless alone — most of the internet is not web |
-| Port > 10000 | 27 | Tempting but arbitrary; **misses WinRM 5985 and PPTP 1723** |
-| Port 5985 / `Microsoft HTTPAPI` | 9 | Public Windows remote admin |
+| Port > 10000 | 27 | Arbitrary, and it misses WinRM 5985 and PPTP 1723 |
+| Port 5985 / `Microsoft HTTPAPI` | 9 | Public Windows remote administration |
 | Port 1723 / `pptp` object | 4 | Legacy VPN, clean replacement pitch |
-| `tags` has `cloud` (or `cloud` object) | 23 | Weak signal on its own |
-| `tags` has `cdn` | 6 | **Downrank** — edge, not origin |
-| `tags` has `vpn` | 4 | Category, not a score |
-| `tags` has `eol-product` | **2** | Strong but rare; cannot carry the ICP |
-| `tags` has `self-signed` | 2 | TLS hygiene |
-| HTTP 404 | 12 of 37 | Parking / misconfig, not a leak |
-| HTTP 400 | 6 of 37 | Weak at best |
-| HTTP 5xx | 2 of 37 | Real ops pain |
-| HTTP with no `http.waf` | 32 of 37 | Unshielded origin |
-| `http.securitytxt` | **0** | Useless as a positive rule here |
-| `ssl.cert.expired` | 1 of 9 SSL | Strong when `ssl` exists |
-| `opts.heartbleed` present | 8 | Probe metadata only — `opts.vulns` was **empty on all 8** |
-| Countries | US 39, CN 18, then DE/IL/BR/TW/GB | Territory filter belongs in the UI |
+| `tags` has `cloud` | 23 | Describes hosting, not a buyer |
+| `tags` has `cdn` | 6 | Downrank — edge, not origin |
+| `tags` has `eol-product` | 2 | Strong but rare; cannot carry the ICP |
+| HTTP present with no `http.waf` | 32 of 37 | Unshielded origin |
+| HTTP 5xx | 2 of 37 | Real operational pain |
+| `ssl.cert.expired` | 1 of 9 with SSL | Strong when TLS data exists |
+| `opts.vulns` populated | 0 of 8 with `opts.heartbleed` | No CVE feature can be built on this |
+| `http.securitytxt` | 0 | Useless as a positive rule here |
+
+`Google LLC` alone accounted for 15 banners in that slice. Those are cloud IPs,
+not 15 prospects — the origin of the `hyperscaler_unnamed` penalty.
+
+### 2.2 Measured at full scale
+
+| Metric | Value |
+|---|---|
+| Accounts after rollup | 1,585,994 |
+| Named accounts | 203,021 |
+| Sales-addressable accounts | 201,397 |
+| Mean score | 7.19 |
+| Max score | 100 |
+| Addressable and ≥ 40 | 27,707 |
+| Addressable and ≥ 60 | 11,700 |
+| Addressable and ≥ 80 | 2,102 |
+| Countries | 229 |
+
+Signal frequency across accounts: `origin_no_waf` 521,915 · `identified_cpe`
+482,698 · `hyperscaler_unnamed` 349,209 · `cdn_edge` 204,608 · `exposed_winrm`
+64,612 · `weak_tls` 57,054 · `windows_auth_leak` 51,860 · `http_server_error`
+42,949 · `eol_software` 28,755 · `legacy_vpn` 24,056 · `hosted_platform_domain`
+8.
+
+The scale run confirms the profiling read: the genuine signal in this data is
+**protocol and administration-surface exposure**, not an end-of-life epidemic.
 
 ---
 
-## 2. Pipeline
+## 3. Key design decisions
 
-```
-Zstd dump (~10.3M banners)          [prototype: 100-record sample]
-        │  stream via zstd -d -c — never json.load the dump
-        ▼
-Ingest & normalize
-  • decode concatenated JSON incrementally
-  • drop rows without ip_str / port
-        ▼
-Account rollup  (banner → account)
-  1. registrable domain from domains[] / hostnames[]
-  2. else ip_str  (unnamed asset, low sales priority)
-  • never use hyperscaler org as the account key
-        ▼
-Deterministic rule engine   (100% of accounts, $0 LLM)
-  • versioned signal catalog + weights → icp_score 0–100
-  • emits an explainable signal list per account
-        ▼
-        named domain AND icp_score >= gate AND daily cap left?
-              no ──► store + dashboard only
-              yes ─► outreach-draft skill (cheap model)
-                        ▼
-                  logs/traces.jsonl  (model, prompt_version, tokens, cost)
-                        ▼
-                  ranked account queue (UI / CSV export)
-```
+### 3.1 Roll up to accounts before scoring
 
-**Why roll up before scoring:** a salesperson works accounts, not banners. Scoring raw banners inflates noisy hosts and would present 15 Google-hosted IPs as 15 leads.
+A seller works accounts, not banners. Scoring raw banners inflates noisy hosts
+and would present one hyperscaler's IPs as many separate leads. Rollup key
+priority: registrable domain from `domains[]`, then `hostnames[]`, then the IP
+as an explicitly unnamed asset. A hosting `org` is never the account key.
 
-On n = 100 the rollup yields **85 accounts**: **25 syntactically named domains**, 60 IP-only, and **18 sales-addressable domains** after provider-owned hostnames are excluded. Only **3** accounts have more than one banner (max **14**). So on this sample the rollup mostly removes hyperscaler duplication rather than building rich multi-asset accounts — a bigger slice is needed before claiming account depth.
+### 3.2 DuckDB is the execution engine; YAML is the policy
 
-**Storage decision:** at 100 records, plain Python plus JSON is the correct tool; DuckDB/Parquet would be theatre. A columnar store (`banner_fact.parquet` + `account_score.parquet` queried by DuckDB) is only justified when we stream the full ~10.3M-banner dump. Keep scoring a pure function of a record so the same contract runs in Python tests today and in SQL later.
+At a hundred records, plain Python was the right tool. At ten million, a
+columnar store is the only way to answer "addressable, score ≥ 80, country = US"
+without touching every nested JSON field.
+
+The split that keeps this honest: **weights and gates live in YAML, and both
+engines read them.** Python scores a record for tests and evals; generated SQL
+scores the archive. A parity test asserts the two produce identical
+`icp_score`, `is_addressable`, and signal sets, so SQL can never silently drift
+from the audited contract.
+
+The archive is streamed, never expanded. Ingest is the only full pass; serving
+queries hit typed columns in a 432 MB store.
+
+### 3.3 Sanitization belongs at identity time
+
+A commercial queue that contains `localhost`, `10.0.0.7`, `169.254.169.254`, or
+`WORKSTATION1` is worse than an empty queue: it burns seller time and sender
+reputation. `src/identity.py` enforces, in both engines:
+
+- globally routable IPs only — loopback, RFC 1918, link-local and cloud metadata
+  endpoints are dropped at ingest
+- public apex domains only — a dot is required, so NetBIOS names are rejected
+- placeholder names (`unknown`, `null`, `none`, `test`, `-`) rejected
+- non-public suffixes (`.local`, `.arpa`, `.internal`, RFC 2606) rejected
+- known honeypot and sinkhole suffixes rejected
+- provider tenant hostnames kept but marked unaddressable
+
+Rules live in the vertical config, so a new motion tunes them without code.
+
+### 3.4 Resource caps are part of the design
+
+A full load that swaps a laptop is not a working pipeline. Ingest holds at most
+one 5,000-row batch in Python, caps DuckDB at 4 GB and 2 threads, bounds spill
+at 20 GB, and refuses to start below 15 GiB free disk. The parser fails loudly
+on a record larger than 128 MiB rather than silently skipping source data.
 
 ---
 
-## 3. Rules vs LLM
+## 4. Rules versus LLM
 
 | | Deterministic rules | LLM (`outreach-draft`) |
 |---|---|---|
-| Runs on | **Every** banner and account | Named-domain accounts past the gate, under a daily cap |
-| Job | Ports, tags, CPE, HTTP status, TLS, NTLM/PPTP/WinRM, WAF absence, scoring | One CISO-facing brief + email, written **from the already-computed signals** |
-| Cost | CPU only | Tokens — see §6 |
-| Determinism | Required, for evals and sales audit | Temperature ≤ 0.2, JSON-schema output |
-| Failure mode | Missed signal → fix rule, re-run free | Invented CVE → prevented by passing only `signals[]`, never raw banners |
+| Runs on | Every banner and every account | Addressable accounts past the gate, under a daily cap |
+| Job | Ports, tags, CPE, HTTP status, TLS, NTLM/PPTP/WinRM, WAF absence, identity, scoring | One short, evidence-grounded email from already-computed signals |
+| Cost | CPU only | Tokens — see §7 |
+| Determinism | Required, for audit and evals | Structured output validated against a Pydantic schema |
+| Failure mode | Missed signal → fix the rule, re-run for free | Invented claim → prevented by passing only `signals[]`, never raw banners |
 
-**The LLM must not:** compute or override scores, invent CVEs, assert "end-of-life" unless `eol_software` is in the signal list, or treat the hosting `org` as the customer.
+**The model must not** compute or override a score, invent a CVE or breach,
+assert end-of-life unless `eol_software` fired, or treat a hosting `org` as the
+customer.
 
-### 3.1 Signal catalog v1
+### 4.1 Signal catalog v1
 
-Weights are a documented policy, not a fitted model. Score is clamped to 0–100.
+Weights are documented policy, not a fitted model. Score is clamped to 0–100.
 
 | Code | Trigger | Weight |
 |---|---|---|
-| `exposed_winrm` | `port in (5985,5986)`, `product` contains WinRM, or HTTPAPI server | +30 |
+| `exposed_winrm` | port 5985/5986, `product` contains WinRM, or HTTPAPI server | +30 |
 | `eol_software` | `tags` has `eol-product` | +30 |
 | `legacy_vpn` | `pptp` object, port 1723, or `tags` has `vpn` | +25 |
 | `windows_auth_leak` | `ntlm` object present | +20 |
-| `weak_tls` | `ssl.cert.expired`, `self-signed` tag, or TLSv1/1.1 offered | +20 |
-| `origin_no_waf` | `http` present, `http.waf` null, not `cdn` | +10 |
-| `http_server_error` | `http.status` in 5xx | +10 |
+| `weak_tls` | expired cert, `self-signed` tag, or TLSv1/1.1 offered | +20 |
+| `origin_no_waf` | `http` present, no `http.waf`, not `cdn` | +10 |
+| `http_server_error` | `http.status` is 5xx | +10 |
 | `identified_cpe` | `cpe` non-empty | +5 |
-| `cdn_edge` | `tags` has `cdn` | **−15** |
-| `hyperscaler_unnamed` | no domain **and** hyperscaler `org` | **−20** |
-| `hosted_platform_domain` | provider-owned hostname such as `amazonaws.com` | **−20** |
+| `cdn_edge` | `tags` has `cdn` | −15 |
+| `hyperscaler_unnamed` | no domain and hyperscaler `org` | −20 |
+| `hosted_platform_domain` | provider-owned hostname such as `amazonaws.com` | −20 |
 
-**Deliberately rejected:** "port > 10000" (+25) and "any cloud footprint" (+20). Both fire on a quarter of the sample, dominate the score, and do not mean the company needs security software. Uncommon ports may return later as a low-weight secondary flag once a port denylist exists.
+**Deliberately rejected:** `port > 10000` (+25) and "any cloud footprint" (+20).
+Both fire on roughly a quarter of records, dominate the score, and do not mean a
+company needs security software. Uncommon ports may return later as a low-weight
+secondary flag once a port denylist exists.
 
-### 3.2 Measured distribution of v1 (n = 100 → 85 accounts)
+### 4.2 Gate
 
-| | Value |
-|---|---|
-| Mean score | **12.1** |
-| Max score | **60** |
-| Zero-score accounts | 43 of 85 |
-
-| Gate | Accounts ≥ gate | Of those, named |
-|---|---|---|
-| ≥ 20 | 17 (20%) | 5 addressable |
-| ≥ 30 | 11 (13%) | 4 addressable |
-| ≥ 40 | **11 (13%)** | **4 addressable** |
-| ≥ 50 | 8 (9%) | 3 addressable |
-| ≥ 60 | 7 (8%) | 2 addressable |
-
-Account-level signal frequency: `origin_no_waf` 32, `identified_cpe` 20, `exposed_winrm` 10, `windows_auth_leak` 9, `hyperscaler_unnamed` 9, `hosted_platform_domain` 7, `cdn_edge` 5, `legacy_vpn` 4, `weak_tls` 3, `eol_software` 2, `http_server_error` 2.
-
-**Gate v1 = sales-addressable domain AND `icp_score >= 40`.** On this sample that is **4 accounts**, which is the right order of magnitude for a demo queue and keeps LLM spend near zero. A `>= 60` gate is not used, because it would leave only 2 addressable accounts.
-
-**Weakness this exposes immediately:** all 7 accounts scoring 60 carry the *identical* triplet `exposed_winrm + windows_auth_leak + origin_no_waf`. A queue would show near-duplicate leads. Signal-pattern deduplication (or capping one lead per `org`/ASN per pattern) is required before this is usable by a human.
+Gate v1 is **addressable AND `icp_score ≥ 80`**, with a cap of 100 drafts per
+day. At full scale that is 2,102 candidate accounts — a deep enough bench for a
+sales team while keeping spend near zero. The gate is a config value, not a
+percentile: percentile gating over ten million records is how a prototype turns
+into a four-figure invoice.
 
 ---
 
-## 4. Observability
+## 5. Observability
 
-One JSONL line per LLM call in `logs/traces.jsonl`. Rules are **not** traced per banner (that would be ~10M rows); the persisted `account_score` output is the audit record.
+One JSONL line per LLM call in `logs/traces.jsonl`. Rule evaluation is not
+traced per banner — that would be ten million rows — the persisted
+`account_score` row is the audit record instead.
 
 ```json
 {
-  "trace_id": "tr_01j9c3k4n5",
-  "timestamp": "2026-09-12T22:43:09Z",
-  "prompt_version": "outreach_draft_v1",
+  "trace_id": "tr_c0643904d6de4b31b5087880cfc23e71",
+  "timestamp": "2026-09-15T17:57:01.524627+00:00",
   "skill_name": "outreach-draft",
+  "prompt_version": "outreach_draft_v1",
   "model": "gpt-4o-mini",
-  "account_id": "domain:example.com",
-  "icp_score": 60,
-  "signals": ["exposed_winrm", "windows_auth_leak", "origin_no_waf"],
-  "latency_ms": 482,
-  "prompt_tokens": 420,
-  "completion_tokens": 180,
-  "total_cost_usd": 0.000171,
+  "vertical": "cybersecurity",
+  "decision": "draft_outreach",
+  "account_id": "domain:182-airtel.com",
+  "icp_score": 100,
+  "signals": ["eol_software", "exposed_winrm", "http_server_error", "identified_cpe", "origin_no_waf", "weak_tls", "windows_auth_leak"],
+  "request": { "account_name": "…", "country_code": "IN", "icp_score": 100, "ports": [], "signals": [] },
+  "response": { "subject": "…", "opening": "…", "evidence": [], "call_to_action": "…", "confidence": "medium" },
+  "latency_ms": 6190,
+  "prompt_tokens": 606,
+  "completion_tokens": 74,
+  "total_cost_usd": 0.0001353,
   "output_status": "success",
   "validation_passed": true
 }
 ```
 
-`request` and `response` are mandatory but redacted: the request contains only account name, country, score, ports, and deterministic signals; the response is the validated outreach object. `prompt_version`, `model`, `signals`, `icp_score`, token counts and cost are also mandatory, since v1-vs-v2 comparison is computed from them. **Never** log `http.html`, `ssl.chain`, `http.favicon.data`, or the raw `data` banner — that is third-party content and it bloats the log.
+`src/tracer.py` writes through an allowlist, so an unknown field is discarded
+rather than leaked. `request` carries only account name, country, score, ports,
+and deterministic signals; `response` is the validated draft object. Raw
+`data`, `http.html`, `ssl.chain`, and favicon bytes never reach the log — that
+is third-party content and it would bloat the file.
+
+Because `prompt_version`, `model`, tokens, and cost are mandatory, a v1-to-v2
+prompt comparison is a query over this file rather than a new instrumentation
+project.
 
 ---
 
-## 5. Repository layout
+## 6. Evaluation
 
-| Path | Role | Status |
-|---|---|---|
-| `scripts/convert_shodan_to_json.py` | Streams the Zstd dump into readable JSON/JSONL samples | **built** |
-| `data/readable/shodan_100*.json*` | n = 100 working sample | **built** |
-| `ARCHITECTURE.md` | This document | **built** |
-| `config/verticals/cybersecurity.yaml` | Cybersecurity weights, gate, identity denylists | **built** |
-| `src/scoring.py` | Vertical-agnostic rollup and scoring | **built** |
-| `src/verticals/cybersecurity.py` | Scan-banner signal extractor | **built** |
-| `skills/outreach-draft/SKILL.md` | Trigger, inputs (`account` + `signals` only), output schema, worked example | **built** |
-| `prompts/outreach_draft_v1.md` | Versioned prompt; v2 is a new file, never a silent edit | **built** |
-| `evals/` | 25 labelled accounts + one-command deterministic harness | **baseline built; human label review and live LLM eval pending** |
-| `PLANNING.md` | Chosen use cases and why | **built** |
-| `HOW_I_BUILD.md` | Dev-loop reflection | **built** |
-| `app.py` | Ranked **account** queue with score, signals, country, ports, draft button | **built** |
+`python evals/run_evals.py` scores 25 hand-labelled accounts from 40 fixture
+banners and writes `evals/results/latest.json`. Two metrics are reported:
 
-The eval set is drawn from this sample. Its 25 accounts include 5 manually reviewed `should_contact` positives and 20 negatives. The deterministic baseline measures contact precision **1.00**, recall **0.80**, F1 **0.889**, and signal-code F1 **1.00**. The missed positive is `estpak.ee`: a legacy VPN signal scores 25, below the gate of 40. These are baseline policy labels; the repository owner must review them before presenting them as a final golden set. A live LLM-output eval is still required once an API key is configured.
+- **Signal extraction** — did the rules find exactly the expected signal codes?
+  Currently precision 1.00, recall 1.00, F1 1.00 across 45 signal decisions.
+  CI fails if this regresses.
+- **Contact policy** — would the account be queued for outreach? This compares
+  labels against the live gate, so it moves whenever gate policy moves.
+
+The harness exits non-zero only on signal-extraction regression. Contact-policy
+disagreement is surfaced rather than enforced, because the gate is a business
+lever that is expected to be re-tuned.
+
+`pytest` (14 tests) covers identity sanitization, rollup and scoring,
+Python/SQL parity, private-IP rejection at ingest, tracing redaction, and the
+dashboard.
 
 ---
 
-## 6. Cost model
+## 7. Cost model
 
-**Rules cost $0 in tokens.** They run over 100% of banners; the only cost is CPU and the one-time 73 GiB stream.
+Rules cost zero tokens. They run over 100% of banners; the only cost is CPU and
+the one-time archive stream.
 
-LLM spend is controlled by a **budget cap, not a percentile**. Percentile gating on a 10.3M-banner dump is how a prototype turns into a four-figure invoice.
-
-Per-draft token estimate (signals + a short banner summary, never raw HTML): **~420 input / ~180 output**. This is an estimate — no LLM calls have been made yet, so `logs/traces.jsonl` does not exist and no measured cost is claimed.
-
-Model split: cheap model (`gpt-4o-mini`-class, $0.150/1M in, $0.600/1M out — verify at ship time) for drafting and classification; a stronger model is only worth it for judgement tasks, and nothing in this pipeline currently needs one.
+Measured from real traces (`gpt-4o-mini`, $0.150/1M input, $0.600/1M output):
 
 ```
-cost_per_draft = (420/1e6 * 0.150) + (180/1e6 * 0.600)
-               = 0.000063 + 0.000108
-               = $0.000171
+mean input  652 tokens
+mean output  78 tokens
+
+cost_per_draft = (652/1e6 × 0.150) + (78/1e6 × 0.600)
+               = 0.0000978 + 0.0000468
+               = $0.000145
 ```
+
+Observed latency is 5.0–6.3 s per draft, and three completed drafts cost
+$0.00043 in total.
 
 | Scenario | Drafts | LLM cost |
 |---|---|---|
-| Current sample (gate ≥ 40, addressable) | 4 | **$0.0007** |
-| Demo cap: 500 drafts/day, 30 days | 15,000 | **~$2.57 / month** |
-| Rejected: naive 10% of 10.3M banners | 1,030,000 | ~$176 per dump pass |
+| Daily cap (100/day) | 3,000 / month | **~$0.43 / month** |
+| Draft every account at gate ≥ 80 once | 2,102 | **~$0.30** |
+| Rejected: naive 10% of all banners | 1,004,679 | ~$145 per pass |
 
-**Production ceiling: $25 / month**, alerting at 50% and 80%. When volume grows, hold the dollar ceiling and drop the lowest-scoring accounts from the queue — never widen the gate to unnamed IPs.
+Model choice per task: a cheap model drafts and classifies; nothing in this
+pipeline currently needs a stronger reasoning model, because judgement lives in
+the deterministic catalog. **Production ceiling: $25/month**, alerting at 50%
+and 80%. When volume grows, hold the dollar ceiling and drop the lowest-scoring
+accounts — never widen the gate to unattributable IPs.
 
----
-
-## 7. Known weaknesses
-
-1. **n = 100 from a 40-second scan window.** Port mix (WinRM 5985, 9998, PPTP) is not proven representative of 10.3M banners. Weights are provisional until validated on a larger slice.
-2. **No exact record count** for the dump; ~10.3M is a projection.
-3. **59% of banners have no hostname/domain**, and after an IP-like domain is corrected, 60 of 85 accounts are IP-only. Of the 25 syntactic domains, only 18 are sales-addressable after provider hostnames are removed.
-4. **Near-duplicate high scorers** (§3.2) — deduplication is required before a human uses the queue.
-5. **`opts.vulns` was empty on all 8 records that had it.** Do not build a CVE feature on this field yet.
-6. **EOL appears on only 2%.** The genuine signal in this dump is *protocol and admin-surface exposure* (WinRM, NTLM, PPTP, unshielded origin), not an EOL epidemic.
-7. **Sensitive content.** Banners carry third-party HTML, certificates, NTLM data and favicons. They stay out of git, out of traces, and out of prompts apart from a truncated title/server header.
-8. **Not yet a git repository.** `.gitignore` now excludes the 10 GB dump and runtime traces, but that protection starts only after git is initialized.
+Budget enforcement is code, not documentation: `src/llm_client.py` checks the
+monthly spend and the daily draft count from the trace log *before* calling the
+API.
 
 ---
 
-## 8. Build order
+## 8. Known weaknesses
 
-1. Have a human review the 25 provisional account labels and resolve the `legacy_vpn` gate miss.
-2. Add signal-pattern dedup so identical-fingerprint accounts collapse.
-3. Add a live, schema- and claim-grounding eval for `outreach_draft_v1`.
-4. Deploy the ranked account queue and collect measured latency/token traces.
-5. Only then consider streaming the full dump into Parquet; the demo must not depend on a 73 GiB expansion.
+1. **Contact-policy evals are stale against the current gate.** The 25 labels
+   were written when the gate was 40; the gate is now 80, so every labelled
+   positive now reads as a miss. The labels need re-review against the live
+   policy before contact precision/recall is quoted.
+2. **Signal detail text is lost on the SQL path.** `account_score` stores signal
+   *codes*, so the app reconstructs details as "Detected by deterministic rule:
+   <code>". The model therefore receives weaker evidence than the Python
+   extractor produces, and drafts read generically. Persisting detail strings is
+   the highest-value fix for draft quality.
+3. **Briefs carry too many ports.** Some accounts pass 30+ ports into the
+   prompt. That is telemetry, not a sales brief; ports should be summarized.
+4. **Near-duplicate high scorers.** Many top accounts share an identical signal
+   fingerprint. Signal-pattern deduplication, or one lead per org/ASN per
+   pattern, is required before a human works the list end to end.
+5. **Attribution remains the ceiling.** 1.38M of 1.59M accounts are IP-only.
+   Reliable company enrichment is needed before this is a primary lead source.
+6. **No output-quality eval for generated drafts.** Structure is validated and
+   claims are constrained by construction, but claim-grounding is not yet
+   measured against labelled examples.
+7. **Weights are provisional.** The base rates that shaped them came from a
+   single short scan window; the full load supports their direction but has not
+   been used to recalibrate them.
+8. **One archive, one moment.** This is a point-in-time scan. Exposure change
+   over time — a much stronger buying signal — needs a second snapshot.
 
 ---
 
-## 9. Adding a vertical
+## 9. Roadmap
 
-Keep industry logic out of the engine.
+1. Re-review the 25 labels against the current gate and restore a defensible
+   contact precision/recall figure.
+2. Persist signal detail strings through to `account_score` and summarize ports,
+   then re-measure draft quality.
+3. Add a claim-grounding eval for `outreach_draft_v1`, and use it to justify a
+   v2 prompt file.
+4. Collapse duplicate signal fingerprints in the queue.
+5. Ingest a second snapshot and add change-over-time signals.
+
+---
+
+## 10. Adding a vertical
+
+Industry logic stays out of the engine.
 
 | Layer | Stays generic | Lives in the vertical |
 |---|---|---|
-| Identity | domain / hostname / IP | denylist of provider hostnames |
+| Identity | domain / hostname / IP, public-routability rules | provider and honeypot denylists |
 | Rollup | one score per account | — |
-| Signals | identity-quality flags | ICP catalog (`extract_record_signals`) |
-| Gate + cost | daily cap, trace schema | `llm_gate_score`, `prompt_path` |
-| Evals | harness | labelled set for that motion |
+| Signals | identity-quality flags | ICP catalog via `extract_record_signals` |
+| Gate and cost | daily cap, budget check, trace schema | `llm_gate_score`, `prompt_path` |
+| Evals | harness and metrics | labelled set for that motion |
 
-Activate with `VERTICAL=<id>`. Do not add a second live vertical until the
-cybersecurity labels have been reviewed.
+Activate with `VERTICAL=<id>`. A second live vertical should wait until the
+cybersecurity labels are reconciled with the current gate.

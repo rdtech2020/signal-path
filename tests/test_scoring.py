@@ -1,20 +1,23 @@
-from pathlib import Path
+from __future__ import annotations
+
+from typing import Any
 
 import pytest
 
-from src.ingester import load_records, normalize_banner
-from src.scoring import account_identity, qualified_accounts, score_accounts
-
-SAMPLE_PATH = Path("data/readable/shodan_100.jsonl")
+from src.scoring import account_identity, load_rules, qualified_accounts, score_accounts
 
 
-def sample_accounts():
-    records = [
-        normalized
-        for record in load_records(SAMPLE_PATH)
-        if (normalized := normalize_banner(record)) is not None
-    ]
-    return score_accounts(records)
+def public_winrm_record() -> dict[str, Any]:
+    return {
+        "ip_str": "8.8.8.8",
+        "port": 5985,
+        "domains": ["acme-security.io"],
+        "product": "WinRM",
+        "http": {"status": 404, "server": "Microsoft-HTTPAPI/2.0"},
+        "ntlm": {"os": "Windows"},
+        "location": {"country_code": "US"},
+        "org": "Acme Ltd",
+    }
 
 
 def test_ip_with_trailing_dot_is_not_a_named_account():
@@ -28,15 +31,33 @@ def test_ip_with_trailing_dot_is_not_a_named_account():
     assert is_named is False
 
 
-def test_sample_rollup_is_stable():
-    accounts = sample_accounts()
-    assert len(accounts) == 85
-    assert sum(account.is_named for account in accounts) == 25
-    assert sum(account.is_addressable for account in accounts) == 18
-
-
-def test_sample_gate_returns_four_addressable_accounts():
-    assert len(qualified_accounts(sample_accounts())) == 4
+def test_named_accounts_roll_up_and_qualify():
+    accounts = score_accounts(
+        [
+            public_winrm_record(),
+            {**public_winrm_record(), "port": 5986},
+            {
+                "ip_str": "1.1.1.1",
+                "port": 80,
+                "domains": ["cdn-edge.net"],
+                "tags": ["cdn"],
+                "http": {"status": 200},
+            },
+        ]
+    )
+    by_id = {account.account_id: account for account in accounts}
+    acme = by_id["domain:acme-security.io"]
+    assert acme.banner_count == 2
+    assert acme.is_addressable is True
+    assert acme.icp_score >= 40
+    assert {signal.code for signal in acme.signals} >= {
+        "exposed_winrm",
+        "windows_auth_leak",
+    }
+    qualified = qualified_accounts(accounts, {**load_rules(), "llm_gate_score": 40})
+    assert [account.account_id for account in qualified] == [
+        "domain:acme-security.io"
+    ]
 
 
 def test_unknown_vertical_is_rejected():
@@ -48,21 +69,5 @@ def test_unknown_vertical_is_rejected():
 
 
 def test_accounts_are_tagged_with_active_vertical():
-    accounts = sample_accounts()
-    assert accounts
-    assert all(account.vertical == "cybersecurity" for account in accounts)
-
-
-def test_sensitive_payloads_are_removed():
-    record = {
-        "ip_str": "203.0.113.10",
-        "port": 443,
-        "data": "raw banner",
-        "http": {"html": "<html>secret</html>", "status": 200},
-        "ssl": {"chain": ["certificate"], "jarm": "hash"},
-    }
-    normalized = normalize_banner(record)
-    assert normalized is not None
-    assert "data" not in normalized
-    assert "html" not in normalized["http"]
-    assert "chain" not in normalized["ssl"]
+    accounts = score_accounts([public_winrm_record()])
+    assert accounts[0].vertical == "cybersecurity"

@@ -13,7 +13,8 @@ from typing import Any
 
 import duckdb
 
-from src.ingester import iter_jsonl, normalize_banner
+from src.identity import is_hosted_platform, is_public_ip, is_sales_addressable
+from src.ingester import iter_json_objects, iter_jsonl, normalize_banner
 from src.scoring import account_identity, load_rules
 from src.verticals import get_extractor
 
@@ -95,7 +96,6 @@ def iter_zstd_json(path: Path) -> Iterator[dict[str, Any]]:
     if not zstd_path:
         raise RuntimeError("zstd is required; install it with `brew install zstd`")
 
-    from scripts.convert_shodan_to_json import iter_json_objects
 
     process = subprocess.Popen(
         [zstd_path, "-d", "-c", str(path)],
@@ -114,13 +114,6 @@ def iter_zstd_json(path: Path) -> Iterator[dict[str, Any]]:
             raise RuntimeError(f"zstd exited with status {return_code}")
 
 
-def _is_hosted_platform(account_name: str, suffixes: tuple[str, ...]) -> bool:
-    return any(
-        account_name == suffix or account_name.endswith(f".{suffix}")
-        for suffix in suffixes
-    )
-
-
 def _fact_row(
     record: dict[str, Any],
     rules: dict[str, Any],
@@ -131,9 +124,14 @@ def _fact_row(
         return None
 
     account_id, account_name, is_named = account_identity(normalized)
-    hosted_suffixes = tuple(rules.get("hosted_platform_domain_suffixes") or ())
-    is_addressable = is_named and not _is_hosted_platform(
-        account_name, hosted_suffixes
+    ip_str = str(normalized["ip_str"])
+    if not is_public_ip(ip_str):
+        return None
+    is_addressable = is_sales_addressable(
+        account_name,
+        [ip_str],
+        rules,
+        is_named=is_named,
     )
     location = normalized.get("location")
     country_code = (
@@ -153,7 +151,11 @@ def _fact_row(
         )
     ):
         signal_names.add("hyperscaler_unnamed")
-    if is_named and not is_addressable and "hosted_platform_domain" in signal_codes:
+    if (
+        is_named
+        and is_hosted_platform(account_name, rules)
+        and "hosted_platform_domain" in signal_codes
+    ):
         signal_names.add("hosted_platform_domain")
 
     return (
@@ -163,7 +165,7 @@ def _fact_row(
         is_addressable,
         country_code,
         org,
-        str(normalized["ip_str"]),
+        ip_str,
         int(normalized["port"]),
         *(code in signal_names for code in signal_codes),
     )
@@ -365,9 +367,73 @@ def build_database(
                 stage_path=stage_path,
             )
             account_count = materialize_account_scores(connection, rules)
+            refresh_sales_eligibility(connection, rules)
+            account_count = int(
+                connection.execute("SELECT COUNT(*) FROM account_score").fetchone()[0]
+            )
         finally:
             stage_path.unlink(missing_ok=True)
     return banner_count, account_count
+
+
+def refresh_sales_eligibility(
+    connection: duckdb.DuckDBPyConnection,
+    rules: dict[str, Any] | None = None,
+) -> int:
+    """Recompute is_addressable from names and IPs without re-ingesting banners."""
+    active_rules = rules or load_rules()
+    rows = connection.execute(
+        """
+        SELECT account_id, account_name, ip_addresses, is_named
+        FROM account_score
+        """
+    ).fetchall()
+    updates = [
+        (
+            is_sales_addressable(
+                str(account_name),
+                list(ip_addresses or ()),
+                active_rules,
+                is_named=bool(is_named),
+            ),
+            str(account_id),
+        )
+        for account_id, account_name, ip_addresses, is_named in rows
+    ]
+    connection.execute(
+        """
+        CREATE TEMP TABLE eligibility_update (
+            is_addressable BOOLEAN,
+            account_id VARCHAR
+        )
+        """
+    )
+    if updates:
+        connection.executemany(
+            "INSERT INTO eligibility_update VALUES (?, ?)",
+            updates,
+        )
+    connection.execute(
+        """
+        UPDATE account_score
+        SET is_addressable = eligibility_update.is_addressable
+        FROM eligibility_update
+        WHERE account_score.account_id = eligibility_update.account_id
+        """
+    )
+    connection.execute("DROP TABLE eligibility_update")
+    connection.execute("CHECKPOINT")
+    return int(
+        connection.execute(
+            "SELECT COUNT(*) FROM account_score WHERE is_addressable"
+        ).fetchone()[0]
+    )
+
+
+def refresh_database_eligibility(database_path: Path) -> int:
+    """Apply current YAML sanitization rules to an existing DuckDB file."""
+    with closing(connect_database(database_path)) as connection:
+        return refresh_sales_eligibility(connection)
 
 
 def query_qualified_accounts(
