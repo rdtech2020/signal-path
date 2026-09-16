@@ -10,42 +10,52 @@ motion with its own signal catalog, weights, attribution rules, eval set, and
 prompt. The engine — identity, rollup, gating, tracing, outreach — stays the
 same.
 
+**Live app:** [https://signal-path-icp-score.streamlit.app/](https://signal-path-icp-score.streamlit.app/)
+
 ## What is in the box
 
-| Piece | What it is | Why it matters |
-|---|---|---|
-| `scripts/build_duckdb.py` | Streams the compressed scan archive into DuckDB under fixed resource caps | Turns 10.5 GiB of compressed JSON into a queryable store without ever writing 73 GiB of text |
-| `src/identity.py` | Public-IP and public-apex-domain sanitization | A queue containing `localhost` or `10.0.0.7` destroys seller trust and sender reputation |
-| `src/scoring.py` + `config/verticals/cybersecurity.yaml` | Deterministic account rollup and weighted ICP score | Every number is reconstructable from config, so sales can audit a rank |
-| `src/duckdb_store.py` | SQL rollup and bounded queue queries | The dashboard reads 100 rows, never 10M banners |
-| `src/store_fetch.py` + `scripts/export_serving_store.py` | Ships a 46 MiB store to a hosted container | A host cannot rebuild from a 10.5 GiB archive, so it downloads a serving copy of the result |
-| `src/brief.py` | Turns an account into a sales brief | 34 open ports is telemetry; two cited ports plus a count is a reason to call |
-| `skills/outreach-draft/SKILL.md` | Reusable, versioned AI workflow | Any agent can load the same trigger, inputs, and output contract |
-| `prompts/outreach_draft_v*.md` | Versioned prompt files | A new version is a new file, so past traces stay interpretable |
-| `src/llm_client.py` + `src/tracer.py` | Schema-validated generation with budget gates and JSONL tracing | Cost, latency, and claims are measurable per call |
-| `evals/` | 31 labelled accounts, 46 fixture banners, one-command harness | Scoring changes are measured, not asserted |
-| `app.py` | Streamlit queue with score, signals, territory, and draft button | The product surface a seller actually uses |
+
+| Piece                                                    | What it is                                                                | Why it matters                                                                               |
+| -------------------------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `scripts/build_duckdb.py`                                | Streams the compressed scan archive into DuckDB under fixed resource caps | Turns 10.5 GiB of compressed JSON into a queryable store without ever writing 73 GiB of text |
+| `src/identity.py`                                        | Public-IP and public-apex-domain sanitization                             | A queue containing `localhost` or `10.0.0.7` destroys seller trust and sender reputation     |
+| `src/scoring.py` + `config/verticals/cybersecurity.yaml` | Deterministic account rollup and weighted ICP score                       | Every number is reconstructable from config, so sales can audit a rank                       |
+| `src/duckdb_store.py`                                    | SQL rollup and bounded queue queries                                      | The dashboard reads 100 rows, never 10M banners                                              |
+| `src/store_fetch.py` + `scripts/export_serving_store.py` | Ships a 46 MiB store to a hosted container                                | A host cannot rebuild from a 10.5 GiB archive, so it downloads a serving copy of the result  |
+| `src/brief.py`                                           | Turns an account into a sales brief                                       | 34 open ports is telemetry; two cited ports plus a count is a reason to call                 |
+| `skills/outreach-draft/SKILL.md`                         | Reusable, versioned AI workflow                                           | Any agent can load the same trigger, inputs, and output contract                             |
+| `prompts/outreach_draft_v*.md`                           | Versioned prompt files                                                    | A new version is a new file, so past traces stay interpretable                               |
+| `src/llm_client.py` + `src/tracer.py`                    | Schema-validated generation with budget gates and JSONL tracing           | Cost, latency, and claims are measurable per call                                            |
+| `evals/`                                                 | 31 labelled accounts, 46 fixture banners, one-command harness             | Scoring changes are measured, not asserted                                                   |
+| `app.py`                                                 | Streamlit queue with score, signals, territory, and draft button          | The product surface a seller actually uses                                                   |
+
+
+
 
 ## Current dataset in the store
 
 Measured from `data/signal_path.duckdb`:
 
-| Metric | Value |
-|---|---|
-| Banners ingested | 10,046,794 |
-| Accounts after rollup | 1,585,994 |
-| Named accounts | 203,021 |
-| Sales-addressable accounts | 201,397 |
-| Score ≥ 40 and addressable | 27,707 |
-| Score ≥ 80 and addressable | 2,102 |
-| Countries represented | 229 |
-| Store size | 497 MB |
+
+| Metric                     | Value      |
+| -------------------------- | ---------- |
+| Banners ingested           | 10,046,794 |
+| Accounts after rollup      | 1,585,994  |
+| Named accounts             | 203,021    |
+| Sales-addressable accounts | 201,397    |
+| Score ≥ 40 and addressable | 27,707     |
+| Score ≥ 80 and addressable | 2,102      |
+| Countries represented      | 229        |
+| Store size                 | 497 MB     |
+
+
+
 
 ## Quick start
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
+ 
 pip install -e ".[dev]"
 python scripts/build_duckdb.py
 streamlit run app.py
@@ -59,6 +69,8 @@ drafting needs one:
 cp .env.example .env
 export OPENAI_API_KEY="..."
 ```
+
+
 
 ## Build the store
 
@@ -97,6 +109,8 @@ minute instead of rebuilding:
 python scripts/refresh_eligibility.py
 ```
 
+
+
 ## Query the queue directly
 
 Serving reads only the materialized account table:
@@ -108,6 +122,8 @@ WHERE is_addressable AND icp_score >= 80
 ORDER BY icp_score DESC
 LIMIT 100;
 ```
+
+
 
 ## Verify
 
@@ -138,6 +154,9 @@ Labels themselves are written by hand — the question is whether a seller would
 spend a touch on the account, never whether the score cleared the gate.
 
 ## Deploy
+
+The live queue is at
+[https://signal-path-icp-score.streamlit.app/](https://signal-path-icp-score.streamlit.app/).
 
 A hosted container cannot build the store — that needs the 10.5 GiB archive and
 about twenty minutes — so the store is built once locally and supplied to the
@@ -191,7 +210,7 @@ and `config/`, not in a `signal_path/` package.
 2. `src/verticals/<id>.py` — `extract_record_signals(record, rules)`.
 3. Register it in `src/verticals/__init__.py` (`EXTRACTORS`).
 4. Add labelled accounts under `evals/datasets/` and run
-   `python evals/run_evals.py --vertical <id> --labels ...`.
+  `python evals/run_evals.py --vertical <id> --labels ...`.
 5. Set `VERTICAL=<id>`.
 
 Industry-specific ports, CPE logic, and ICP weights do not belong in
@@ -210,3 +229,4 @@ dashboard.
 - `HOW_I_BUILD.md` — development loop and what it cost
 - `skills/outreach-draft/SKILL.md` — the reusable AI workflow
 - `prompts/outreach_draft_v2.md` — active outreach prompt (`v1` kept for comparison)
+

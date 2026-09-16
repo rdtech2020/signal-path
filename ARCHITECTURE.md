@@ -427,6 +427,9 @@ API.
 
 ## 10. Deployment
 
+The live queue is at
+[https://signal-path-icp-score.streamlit.app/](https://signal-path-icp-score.streamlit.app/).
+
 The ingest pipeline and the serving app have different requirements, so they are
 separated at the artifact boundary: ingest needs the 10.5 GiB archive, `zstd`,
 and twenty minutes; serving needs one 497 MB file and a few hundred megabytes of
