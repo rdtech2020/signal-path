@@ -4,11 +4,13 @@ import duckdb
 
 from src.duckdb_store import (
     connect_database,
+    count_ranked_accounts,
     export_serving_store,
     ingest_records,
     materialize_account_scores,
     query_database_summary,
     query_qualified_accounts,
+    query_ranked_accounts,
 )
 from src.ingester import normalize_banner
 from src.scoring import load_rules, score_accounts
@@ -148,6 +150,52 @@ def test_qualified_query_only_returns_addressable_results(tmp_path):
     assert all(account["is_addressable"] for account in accounts)
     assert all(account["icp_score"] >= 40 for account in accounts)
     assert all(account["account_name"] != "localhost" for account in accounts)
+
+
+def test_paging_walks_every_account_exactly_once(tmp_path):
+    """Offset paging is only safe if the sort order is fully deterministic."""
+    database_path = tmp_path / "signal_path.duckdb"
+    rules = load_rules()
+    records = [
+        {
+            "ip_str": f"8.8.8.{index}",
+            "port": 5985,
+            "domains": [f"acme-{index}.io"],
+            "product": "WinRM",
+        }
+        for index in range(1, 8)
+    ]
+    with closing(
+        connect_database(
+            database_path,
+            memory_limit="512MB",
+            threads=1,
+            temp_directory=tmp_path / "spill",
+            max_temp_size="1GB",
+        )
+    ) as connection:
+        ingest_records(
+            connection,
+            records,
+            rules,
+            batch_size=100,
+            stage_path=tmp_path / "stage.csv",
+            progress_every=0,
+        )
+        materialize_account_scores(connection, rules)
+
+    total = count_ranked_accounts(database_path, addressable_only=False)
+    assert total == len(records)
+
+    seen: list[str] = []
+    for offset in range(0, total, 3):
+        page = query_ranked_accounts(
+            database_path, addressable_only=False, limit=3, offset=offset
+        )
+        seen.extend(str(row["account_id"]) for row in page)
+
+    assert len(seen) == total
+    assert len(set(seen)) == total
 
 
 def test_serving_export_keeps_every_account_and_the_corpus_counts(tmp_path):

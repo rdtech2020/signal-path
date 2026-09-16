@@ -43,7 +43,7 @@ account_score (DuckDB)
                         ▼
                   logs/traces.jsonl — model, prompt version, tokens, cost
                         ▼
-        ranked queue in app.py (bounded to 100 rows per view)
+        ranked queue in app.py (one LIMIT/OFFSET page per view)
 ```
 
 ---

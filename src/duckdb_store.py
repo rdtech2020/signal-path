@@ -521,13 +521,30 @@ def query_qualified_accounts(
             WHERE is_addressable
               AND icp_score >= ?
               {country_sql}
-            ORDER BY icp_score DESC, account_name
+            ORDER BY icp_score DESC, account_name, account_id
             LIMIT ?
             """,
             parameters,
         )
         columns = [description[0] for description in cursor.description]
         return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+
+
+def _ranked_filters(
+    minimum_score: int,
+    addressable_only: bool,
+    country_codes: tuple[str, ...],
+) -> tuple[str, list[object]]:
+    """Build the shared WHERE clause so a page and its count always agree."""
+    clauses = ["icp_score >= ?"]
+    parameters: list[object] = [minimum_score]
+    if addressable_only:
+        clauses.append("is_addressable")
+    if country_codes:
+        placeholders = ", ".join("?" for _ in country_codes)
+        clauses.append(f"country_code IN ({placeholders})")
+        parameters.extend(country_codes)
+    return " AND ".join(clauses), parameters
 
 
 def query_ranked_accounts(
@@ -537,31 +554,46 @@ def query_ranked_accounts(
     addressable_only: bool = True,
     country_codes: tuple[str, ...] = (),
     limit: int = 100,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     """Query a bounded account page without scanning facts in Python."""
-    clauses = ["icp_score >= ?"]
-    parameters: list[object] = [minimum_score]
-    if addressable_only:
-        clauses.append("is_addressable")
-    if country_codes:
-        placeholders = ", ".join("?" for _ in country_codes)
-        clauses.append(f"country_code IN ({placeholders})")
-        parameters.extend(country_codes)
-    parameters.append(limit)
+    where_sql, parameters = _ranked_filters(
+        minimum_score, addressable_only, country_codes
+    )
+    parameters.extend([limit, offset])
 
     with closing(duckdb.connect(str(database_path), read_only=True)) as connection:
         cursor = connection.execute(
             f"""
             SELECT *
             FROM account_score
-            WHERE {" AND ".join(clauses)}
-            ORDER BY icp_score DESC, account_name
-            LIMIT ?
+            WHERE {where_sql}
+            ORDER BY icp_score DESC, account_name, account_id
+            LIMIT ? OFFSET ?
             """,
             parameters,
         )
         columns = [description[0] for description in cursor.description]
         return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+
+
+def count_ranked_accounts(
+    database_path: Path,
+    *,
+    minimum_score: int = 0,
+    addressable_only: bool = True,
+    country_codes: tuple[str, ...] = (),
+) -> int:
+    """Count accounts matching the queue filters, for paging."""
+    where_sql, parameters = _ranked_filters(
+        minimum_score, addressable_only, country_codes
+    )
+    with closing(duckdb.connect(str(database_path), read_only=True)) as connection:
+        row = connection.execute(
+            f"SELECT COUNT(*) FROM account_score WHERE {where_sql}",
+            parameters,
+        ).fetchone()
+    return int(row[0])
 
 
 def query_database_summary(database_path: Path, gate: int) -> dict[str, int]:

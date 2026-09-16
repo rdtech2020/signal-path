@@ -12,6 +12,7 @@ from config.settings import settings
 from src.brief import evidence_ports
 from src.duckdb_store import (
     account_from_row,
+    count_ranked_accounts,
     query_country_codes,
     query_database_summary,
     query_qualified_accounts,
@@ -100,15 +101,35 @@ score_floor = st.sidebar.slider("Minimum score", 0, 100, 0, 5)
 addressable_only = st.sidebar.checkbox("Addressable accounts only", value=True)
 country_options = query_country_codes(database_path)
 countries = st.sidebar.multiselect("Countries", country_options)
+page_size = st.sidebar.selectbox("Rows per page", (50, 100, 250, 500), index=1)
 
 summary = query_database_summary(database_path, gate)
+matching_accounts = count_ranked_accounts(
+    database_path,
+    minimum_score=score_floor,
+    addressable_only=addressable_only,
+    country_codes=tuple(countries),
+)
+total_pages = max(1, -(-matching_accounts // page_size))
+# Keying the widget by filter state resets paging whenever the result set does.
+page = st.sidebar.number_input(
+    f"Page (of {total_pages:,})",
+    min_value=1,
+    max_value=total_pages,
+    value=1,
+    step=1,
+    key=f"page_{score_floor}_{addressable_only}_{page_size}_{'+'.join(countries)}",
+)
+offset = (int(page) - 1) * page_size
+
 filtered = database_accounts(
     query_ranked_accounts(
         database_path,
         minimum_score=score_floor,
         addressable_only=addressable_only,
         country_codes=tuple(countries),
-        limit=100,
+        limit=page_size,
+        offset=offset,
     )
 )
 qualified = database_accounts(
@@ -117,10 +138,6 @@ qualified = database_accounts(
         minimum_score=gate,
         limit=int(rules["daily_draft_cap"]),
     )
-)
-st.caption(
-    "Showing at most 100 qualified and ranked rows. "
-    "Raw banner facts stay outside Python."
 )
 
 metric_columns = st.columns(4)
@@ -131,6 +148,11 @@ metric_columns[3].metric(f"Qualified (≥ {gate})", f"{summary['qualified']:,}")
 
 st.subheader("Ranked account queue")
 if filtered:
+    st.caption(
+        f"Showing {offset + 1:,}–{offset + len(filtered):,} "
+        f"of {matching_accounts:,} matching accounts. "
+        "Each page is one bounded query; raw banner facts stay outside Python."
+    )
     st.dataframe(
         pd.DataFrame(account_rows(filtered)),
         hide_index=True,
