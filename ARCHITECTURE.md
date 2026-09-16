@@ -434,15 +434,28 @@ RAM.
 
 Locally that file is built in place. In a container it is mounted. On a platform
 with only ephemeral disk, `src/store_fetch.py` downloads it from `DATABASE_URL`
-on first run, validates that `account_score` and `banner_fact` are present, and
-renames it into place only after validation, so an interrupted download cannot
-masquerade as a store. Streamlit caches the result per container, making the
-cost a one-time cold start rather than a per-user delay.
+on first run, validates that `account_score` is present, and renames it into
+place only after validation, so an interrupted download cannot masquerade as a
+store. Streamlit caches the result per container, making the cost a one-time
+cold start rather than a per-user delay.
 
-Gzip halves the transfer (474 MiB to 234 MiB) and is decompressed during the
-download, so no intermediate copy is written. The consequence worth stating:
-the hosted queue is only as fresh as the last uploaded store. Refreshing it is a
-rebuild plus an upload, not a deploy.
+What gets shipped is a *serving* export, not the built store:
+
+| Artifact | Size | Contents |
+|---|---|---|
+| Built store | 474 MiB | `banner_fact` (10M rows) + `account_score` |
+| Serving export | 70 MiB | `account_score` (all 1,585,994) + `store_summary` |
+| Uploaded, gzipped | **46 MiB** | as above, decompressed during download |
+
+`banner_fact` is 85% of the file and serving reads one number from it, so
+`scripts/export_serving_store.py` materializes that number into `store_summary`
+and leaves the facts at home. No accounts are dropped, and the dashboard still
+reports the full corpus totals. The account_id index is also skipped, because
+queue queries filter on score and addressability — keeping it would have more
+than doubled the artifact to 149 MiB.
+
+The consequence worth stating: the hosted queue is only as fresh as the last
+uploaded export. Refreshing it is a rebuild plus an upload, not a deploy.
 
 ---
 

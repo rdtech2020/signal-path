@@ -13,6 +13,7 @@ dist/
 data/b2_download_file_by_id
 data/*.duckdb
 data/*.duckdb.wal
+data/*.duckdb.gz
 data/duckdb_tmp/
 data/readable/
 project-task/

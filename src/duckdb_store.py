@@ -565,12 +565,25 @@ def query_ranked_accounts(
 
 
 def query_database_summary(database_path: Path, gate: int) -> dict[str, int]:
-    """Return queue metrics from materialized tables."""
+    """Return queue metrics from materialized tables.
+
+    A serving-only export drops `banner_fact`, so the corpus banner count comes
+    from `store_summary` when the facts are not present.
+    """
     with closing(duckdb.connect(str(database_path), read_only=True)) as connection:
+        tables = {
+            str(row[0]) for row in connection.execute("SHOW TABLES").fetchall()
+        }
+        if "banner_fact" in tables:
+            banner_sql = "(SELECT COUNT(*) FROM banner_fact)"
+        elif "store_summary" in tables:
+            banner_sql = "(SELECT banners FROM store_summary)"
+        else:
+            banner_sql = "0"
         row = connection.execute(
-            """
+            f"""
             SELECT
-                (SELECT COUNT(*) FROM banner_fact) AS banners,
+                {banner_sql} AS banners,
                 COUNT(*) AS accounts,
                 COUNT(*) FILTER (WHERE is_addressable) AS addressable,
                 COUNT(*) FILTER (
@@ -586,6 +599,46 @@ def query_database_summary(database_path: Path, gate: int) -> dict[str, int]:
         "addressable": int(row[2]),
         "qualified": int(row[3]),
     }
+
+
+def export_serving_store(
+    source_path: Path,
+    output_path: Path,
+    *,
+    memory_limit: str = "2GB",
+    threads: int = 2,
+) -> int:
+    """Copy account scores plus corpus counts into a hostable store."""
+    if not source_path.exists():
+        raise FileNotFoundError(source_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    for stale in (output_path, output_path.with_suffix(output_path.suffix + ".wal")):
+        stale.unlink(missing_ok=True)
+
+    with closing(
+        connect_database(output_path, memory_limit=memory_limit, threads=threads)
+    ) as connection:
+        connection.execute(f"ATTACH {_sql_string(str(source_path))} AS source_store")
+        connection.execute(
+            "CREATE TABLE account_score AS SELECT * FROM source_store.account_score"
+        )
+        connection.execute(
+            """
+            CREATE TABLE store_summary AS
+            SELECT
+                (SELECT COUNT(*) FROM source_store.banner_fact) AS banners,
+                COUNT(*) AS accounts,
+                COUNT(*) FILTER (WHERE is_addressable) AS addressable
+            FROM source_store.account_score
+            """
+        )
+        # No account_id index here: queue queries filter on score and
+        # addressability, and the index would more than double the download.
+        connection.execute("DETACH source_store")
+        connection.execute("CHECKPOINT")
+        return int(
+            connection.execute("SELECT COUNT(*) FROM account_score").fetchone()[0]
+        )
 
 
 def query_country_codes(database_path: Path) -> list[str]:

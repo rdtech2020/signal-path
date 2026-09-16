@@ -20,7 +20,8 @@ import duckdb
 ALLOWED_SCHEMES = ("https://", "http://", "file://")
 CHUNK_BYTES = 1 << 20
 DOWNLOAD_TIMEOUT_SECONDS = 120
-REQUIRED_TABLES = ("account_score", "banner_fact")
+# A serving-only export drops banner_fact, so only the queue table is required.
+REQUIRED_TABLES = ("account_score",)
 MIN_FREE_GIB = 2
 
 

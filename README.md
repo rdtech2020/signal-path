@@ -18,7 +18,7 @@ same.
 | `src/identity.py` | Public-IP and public-apex-domain sanitization | A queue containing `localhost` or `10.0.0.7` destroys seller trust and sender reputation |
 | `src/scoring.py` + `config/verticals/cybersecurity.yaml` | Deterministic account rollup and weighted ICP score | Every number is reconstructable from config, so sales can audit a rank |
 | `src/duckdb_store.py` | SQL rollup and bounded queue queries | The dashboard reads 100 rows, never 10M banners |
-| `src/store_fetch.py` | Pulls a prebuilt store into a hosted container | A host cannot rebuild from a 10.5 GiB archive, so it downloads the result |
+| `src/store_fetch.py` + `scripts/export_serving_store.py` | Ships a 46 MiB store to a hosted container | A host cannot rebuild from a 10.5 GiB archive, so it downloads a serving copy of the result |
 | `src/brief.py` | Turns an account into a sales brief | 34 open ports is telemetry; two cited ports plus a count is a reason to call |
 | `skills/outreach-draft/SKILL.md` | Reusable, versioned AI workflow | Any agent can load the same trigger, inputs, and output contract |
 | `prompts/outreach_draft_v*.md` | Versioned prompt files | A new version is a new file, so past traces stay interpretable |
@@ -153,18 +153,24 @@ docker run -p 8501:8501 \
   -e OPENAI_API_KEY signal-path
 ```
 
-**Streamlit Community Cloud**, or anywhere without persistent storage. Upload
-the store to object storage and let the app fetch it on first run:
+**Streamlit Community Cloud**, or anywhere without persistent storage. Export a
+serving-only store, upload it, and let the app fetch it on first run:
 
 ```bash
-gzip -c data/signal_path.duckdb > signal_path.duckdb.gz   # 474 MiB -> 234 MiB
-# upload signal_path.duckdb.gz somewhere the app can read over HTTPS
+python scripts/export_serving_store.py            # 474 MiB -> 70 MiB
+gzip -kf data/signal_path_serving.duckdb          # 70 MiB  -> 46 MiB
+# upload data/signal_path_serving.duckdb.gz somewhere readable over HTTPS
 ```
+
+The export keeps every one of the 1,585,994 accounts. It drops `banner_fact`,
+which is 85% of the built store and is read by the app only for the corpus
+banner count — that count is materialized into a small `store_summary` table
+instead, so the dashboard still reports the full 10,046,794 banners.
 
 Then set these as secrets (Streamlit exposes secrets as environment variables):
 
 ```
-DATABASE_URL = "https://.../signal_path.duckdb.gz"
+DATABASE_URL = "https://.../signal_path_serving.duckdb.gz"
 OPENAI_API_KEY = "..."
 ```
 

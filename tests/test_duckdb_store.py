@@ -1,9 +1,13 @@
 from contextlib import closing
 
+import duckdb
+
 from src.duckdb_store import (
     connect_database,
+    export_serving_store,
     ingest_records,
     materialize_account_scores,
+    query_database_summary,
     query_qualified_accounts,
 )
 from src.ingester import normalize_banner
@@ -144,6 +148,41 @@ def test_qualified_query_only_returns_addressable_results(tmp_path):
     assert all(account["is_addressable"] for account in accounts)
     assert all(account["icp_score"] >= 40 for account in accounts)
     assert all(account["account_name"] != "localhost" for account in accounts)
+
+
+def test_serving_export_keeps_every_account_and_the_corpus_counts(tmp_path):
+    """Hosting the queue must not mean hosting the facts behind it."""
+    source_path = tmp_path / "signal_path.duckdb"
+    rules = load_rules()
+    with closing(
+        connect_database(
+            source_path,
+            memory_limit="512MB",
+            threads=1,
+            temp_directory=tmp_path / "spill",
+            max_temp_size="1GB",
+        )
+    ) as connection:
+        ingest_records(
+            connection,
+            _records(),
+            rules,
+            batch_size=100,
+            stage_path=tmp_path / "stage.csv",
+            progress_every=0,
+        )
+        materialize_account_scores(connection, rules)
+
+    full_summary = query_database_summary(source_path, 40)
+    serving_path = tmp_path / "serving.duckdb"
+    accounts = export_serving_store(source_path, serving_path, memory_limit="512MB")
+
+    assert accounts == full_summary["accounts"]
+    assert query_database_summary(serving_path, 40) == full_summary
+    assert serving_path.stat().st_size < source_path.stat().st_size
+    with closing(duckdb.connect(str(serving_path), read_only=True)) as connection:
+        tables = {str(row[0]) for row in connection.execute("SHOW TABLES").fetchall()}
+    assert "banner_fact" not in tables
 
 
 def test_private_ips_are_dropped_during_duckdb_ingest(tmp_path):
